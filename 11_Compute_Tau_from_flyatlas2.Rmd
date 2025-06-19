@@ -1,0 +1,119 @@
+---
+title: "High-Protein BigCages - compute Tau from flyatlas2"
+Author: "Claudia Ramirez-lanzas"
+Date: "17/12/2024"
+---
+
+# Load libraries:
+```{r}
+# Data handling:
+library("writexl") 
+library("tidyverse") 
+
+# Plotting:
+library("ggplot2") 
+
+```
+# Import file:
+```{r}
+fly_atlas2_FPKM <- read_csv("input_files/FlyAtlas2_gene_data_2023.csv", show_col_types = FALSE)
+colnames(fly_atlas2_FPKM)[1] <- "gene_id"
+
+```
+*fly_atlas2_FPKM: D.melanogaster tissue specific gene expression data-set downloaded from
+https://motif.mvls.gla.ac.uk/FlyAtlas2
+# Prepare fly_atlas2_FPKM_male:
+We subset male tissues
+```{r}
+colnames(fly_atlas2_FPKM)
+# Select columns with male tissues (15 tissues):
+expression_tissues <- dplyr::select(fly_atlas2_FPKM, matches(" M|Testis|Accessory"))
+expression_tissues <- expression_tissues[,2:16]
+fly_atlas2_FPKM_male <- cbind(fly_atlas2_FPKM[,1], expression_tissues)
+
+# Any gene with zero expression in all tissues?
+fly_atlas2_FPKM_male[rowSums(fly_atlas2_FPKM_male==0)]
+table(rowSums(fly_atlas2_FPKM_male[,2:16])==0)
+# Remove those genes with zero expression:
+fly_atlas2_FPKM_male <- fly_atlas2_FPKM_male[rowSums(fly_atlas2_FPKM_male[,2:16])>0,]
+
+
+```
+# Function 1:
+Function 1 computes tau (tissue specificity index) following the formula
+originally developed in:
+
+Yanai I, Benjamin H, Shmoish M, Chalifa-Caspi V, Shklar M, Ophir R,
+Bar-Even A, Horn-Saban S, Safran M, Domany E, Lancet D, Shmueli O.
+Genome-wide midrange transcription profiles reveal expression level
+relationships in human tissue specification. Bioinformatics.
+2005 Mar 1;21(5):650-9. doi: 10.1093/bioinformatics/bti042.
+Epub 2004 Sep 23. PMID: 15388519.
+
+Note: we remove genes with zero expression across all tested tissues
+Note: we keep genes with zero expression in at least one
+tissue (following Yanai et al., 2005, Bioinformatics)
+
+```{r}
+calculate_tau <- function(flyatlas_df) {
+  # Ensure the first column is gene_id and the rest are tissue expressions
+  gene_ids <- flyatlas_df[[1]]
+  expression_matrix <- as.matrix(flyatlas_df[, -1]) # Exclude gene_id column
+  
+  # Create empty vectors to store results:
+  max_tissue <- character(nrow(flyatlas_df))
+  tau_values <- numeric(nrow(flyatlas_df))
+  
+  # Loop through each row (gene):
+  for (i in 1:nrow(expression_matrix)) {
+    gene_expression <- expression_matrix[i, ]
+    max_expr <- max(gene_expression) # Maximum expression across tissues for the gene
+    max_tissue[i] <- colnames(expression_matrix)[which.max(gene_expression)] # Tissue with max expression
+    
+    # Compute tau:
+    deviations <- 1 - (gene_expression / max_expr) # Deviations for all tissues
+    tau <- sum(deviations) / (length(gene_expression) - 1) # Tau calculation
+    tau_values[i] <- tau
+  }
+  
+  # Create the resulting data frame
+  result <- data.frame(
+    gene_id = gene_ids,
+    max_expressed_tissue = max_tissue,
+    tau = tau_values,
+    stringsAsFactors = FALSE
+  )
+  
+  return(result)
+}
+
+```
+# Compute Tau:
+```{r}
+tau_flyatlas2_FKM_male <- calculate_tau(fly_atlas2_FPKM_male)
+colnames(tau_flyatlas2_FKM_male)[1] <- "gene_id"
+
+```
+# Plot distribution of Tau:
+```{r}
+ggplot(tau_flyatlas2_FKM_male, aes(x = max_expressed_tissue, y = tau)) +
+geom_boxplot() +
+  theme(axis.text.x = element_text(angle=90)) +
+  theme_classic2()
+
+ggplot(tau_flyatlas2_FKM_male, aes(x = tau)) +
+geom_histogram() +
+  theme(axis.text.x = element_text(angle=90)) +
+  theme_classic2()
+
+```
+# Export tau_flyatlas2_FKM_male:
+```{r}
+export_df <- tau_flyatlas2_FKM_male
+  
+#write_csv(export_df, "input_files/tau_flyatlas2_FKM_male.csv")
+#write_csv(export_df, "output_files/tau_flyatlas2_FKM_male.csv")
+
+```
+
+--- END ---

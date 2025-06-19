@@ -1,0 +1,63 @@
+---
+title: "High-Protein BigCages - plot diet composition"
+Author: "Claudia Ramirez-lanzas"
+Date: "25/02/2025"
+---
+
+# Load libraries:
+```{r}
+library("readxl") 
+library("writexl") 
+library("tidyverse") 
+library("ggplot2")  # plotting
+```
+
+# Prepare the dataset:
+Diet composition based in Supplementary Table S1 
+```{r}
+diets_composition <- data.frame(Diet = c("Standard (P:C = 1:4)",
+                                         "High Protein (P:C = 1:1)"),
+                                Protein = c(17.0,
+                                            40.9),
+                                Carbohydrate = c(64.11,
+                                                 43.5))
+
+diets_composition <- diets_composition %>%
+  pivot_longer(cols = c(Protein, Carbohydrate),
+                names_to = "Component", values_to = "g_L_food")
+
+diets_composition
+
+```
+# Fig. S2 - Plot diet composition
+```{r}
+diets_composition$Component <- factor(diets_composition$Component, levels = c("Protein", "Carbohydrate"))
+
+diets_composition %>% ggplot(aes(x = Diet, y = g_L_food, fill = Component)) +
+  geom_bar(stat = "identity", width = 0.5) + 
+  theme_linedraw() +  geom_text(aes(label = round(g_L_food, 1)), 
+            position = position_stack(vjust = 0.5), # Centers the label in the bar
+            size = 5, color = "black") +
+  scale_fill_manual(values = c("#8073ac","#e08214"), name="") +
+  theme(panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    legend.position="bottom",
+    axis.title.x = element_text(size = 16),
+    axis.title.y = element_text(size = 16),
+    axis.text.x = element_text(size = 16, color = "black"),
+    axis.text.y = element_text(size = 16, color = "black"),
+    legend.title = element_text(size = 14),
+    legend.text = element_text(size = 14)) + ylab("g / L food")
+  #ylab(bquote("g /" ~ L ~ H[2] * O)) 
+
+# Export the plot:
+#ggsave("output_files/plots/diet_composition/diet_composition.png",
+       #last_plot(),
+       #units = "mm",
+       #height = 150,
+       #width = 200,
+       #dpi = 400)
+
+```
+
+-- END ---

@@ -1,0 +1,1177 @@
+---
+title: "High-Protein BigCages - Compute magnitude of phenotypic evolution in High order phenotypes"
+Author: "Claudia Ramirez-Lanzas"
+Date: "03/08/2024"
+---
+
+# Load libraries:
+```{r}
+# Data handling:
+library("readxl") 
+library("writexl") 
+library("tidyverse")
+
+# Plotting:
+library("ggplot2")  
+library("svglite") 
+library("patchwork") 
+library("gridExtra") 
+library("ggbreak")
+library("ggforce")
+library("ggpubr")
+library("khroma") # plotting colour blind safe
+
+```
+
+# Check sessionInfo:
+```{r}
+sessionInfo()
+
+```
+# Set-up the colors:
+```{r}
+bright <- color("bright")
+plot_scheme(bright(6), colours = TRUE, names = TRUE, size = 0.9)
+#
+muted <- color("muted")
+plot_scheme(muted(9), colours = TRUE, names = TRUE, size = 0.9)
+
+color_plateau <- muted(9)[2] #"#332288"
+color_monotonic <- muted(9)[7] #"#44AA99"
+color_late_response <-  muted(9)[3] #"#DDCC77"
+color_incomplete_reversed <- muted(9)[9] #"#AA4499"
+color_complete_reversed <- muted(9)[5] #"#88CCEE" 
+color_shared <- muted(9)[1] #"#CC6677" 
+
+color_fecundity <- "#a6d854"
+color_dry_weight <- "#e78ac3"
+color_lipid <- "#fdb462"
+color_metabolic_rate <- "#88CCEE"
+
+plot_scheme(muted(9)[2], colours = TRUE, names = TRUE, size = 0.9)
+plot_scheme(muted(9)[7], colours = TRUE, names = TRUE, size = 0.9)
+plot_scheme(muted(9)[9], colours = TRUE, names = TRUE, size = 0.9)
+plot_scheme(muted(9)[3], colours = TRUE, names = TRUE, size = 0.9)
+plot_scheme(muted(9)[5], colours = TRUE, names = TRUE, size = 0.9)
+plot_scheme(muted(9)[1], colours = TRUE, names = TRUE, size = 0.9)
+
+
+```
+# Import files - Big Cages High Protein
+```{r}
+## High order phenotypes:
+fecundity <- read_csv("input_files/BigCages_fecundity_total.csv", show_col_types = FALSE)
+table(fecundity$generation)
+
+dry_weight <- read_csv("input_files/BigCages_dry_weight.csv", show_col_types = FALSE) 
+table(dry_weight$generation)
+
+TAG <- read_csv("input_files/BigCagesTAG_concentrations.csv", show_col_types = FALSE)
+table(TAG$generation, TAG$sex)
+
+```
+
+# Import files - additional studies
+```{r}
+## High order phenotypes ##
+
+fecundity_Rudman <- read_csv("input_files/Rudman_OutdoorCages_AdaptTrack_FecundData_211222.csv", show_col_types = FALSE)
+
+fecundity_Barghi <- read_csv("input_files/Barghi_LNS_HotI_fecundity.csv", show_col_types = FALSE)
+TAG_Barghi <- read_csv("input_files/Barghi_LNS_HotI_HotbodyFatContent.csv", show_col_types = FALSE)
+metabolic_rate_Barghi <- read_csv("input_files/Barghi_LNSI_metabolism.csv", show_col_types = FALSE)
+
+metabolic_rate_Mallard <- read_csv("input_files/Mallard_LNS_HotII_Cold_BCH_metabolism.csv", show_col_types = FALSE)
+# rename respi by units:
+metabolic_rate_Mallard <- metabolic_rate_Mallard %>% dplyr::rename(CO2_L_min_fly = respi)
+
+fecundity_Mallard <- read_csv("input_files/Mallard_LNS_HotII_Cold_fecundity.csv", show_col_types = FALSE)
+fecundity_Mallard_counts <- read_csv("input_files/Mallard_LNS_HotII_Cold_fecundity_counts.csv", show_col_types = FALSE)
+
+```
+
+## Function 1: compute rates: - per group 
+Following original formulation by Gingerich 1993 and Gingerich 2001.
+
+Arguments:
+*generation1: character variable indicating the generation t1 (eg., gen0)
+*generation2: character variable indicating the generation t2 (eg., gen20)
+*generation_lapse: numeric variable indicating number of generations across sampling times  
+*dataset: phenotypic data in 3 columns: (1) with group name (eg., sex),
+(2) with generation value and
+(3) with phenotypic value (eg., eggs). NOTE, Keep columns in the specified order!
+```{r}
+
+# Define the compute_haldanes_per_group function
+compute_rates_per_group <- function(generation1, generation2, t1, t2, generation_lapse, dataset) {
+  # Set generation lapse of Drosophila popultions in our experiment:
+  generation_duration_days <- 12
+  
+  # Create a copy of the data-set:
+  log_dataset <- dataset 
+  
+  # Take the natural logarithm of the phenotype column:
+  log_dataset$logged_phenotype <- log(log_dataset[, 3])
+  
+  # Group by group:
+  grouped_data <- log_dataset %>%
+    group_by(group)
+  
+  # Compute input variables for Haldane formula:
+  result <- grouped_data %>%
+    summarise(n1 = sum(generation == generation1),
+              n2 = sum(generation == generation2),
+              y1 = mean(logged_phenotype[generation == generation1], na.rm = TRUE),
+              y2 = mean(logged_phenotype[generation == generation2], na.rm = TRUE),
+              SD1 = sd(logged_phenotype[generation == generation1], na.rm = TRUE),
+              SD2 = sd(logged_phenotype[generation == generation2], na.rm = TRUE)) %>%
+    # Compute pooled standard deviation (pooled_SD) and Haldanes (H):
+    mutate(pooled_SD = sqrt(((n1 - 1) * SD1^2 + (n2 - 1) * SD2^2) / (n1 + n2 - 2))) %>%
+    mutate(Haldanes = ((y2 - y1) / pooled_SD) / generation_lapse)
+    # Compute Haldane_numerator:
+    result <- result %>% mutate(Haldane_Numerator = (y2 - y1) / pooled_SD)
+    # Compute Darwin_numerator:
+    result <- result %>% mutate(Darwin_Numerator = y2 - y1)
+    # Compute Darwins:
+    result <- result %>% mutate(time_lapse_million_years = ((t2 * generation_duration_days) / (365 * 1e6)) - ((t1 * generation_duration_days) / (365 * 1e6)))
+    result <- result %>% mutate(Darwins =  Darwin_Numerator / time_lapse_million_years) # 12 days a fly generation, 30 generations a year. So years in millions.
+  # Return results:
+  return(result)
+  
+}
+
+```
+
+# ### Compute rates in our study: NLS High Protein ###
+
+# # Part 1_1: Compute rates for High order phenotypes
+## FECUNDITY:
+The sub-replicates of the evolved populations are aggregated by the mean so
+there is only one measurement per replicate and generation.
+
+For base population, I will aggregate the sub-replicates by averaging
+the sub-sub-replicates so we have 10 samples. 
+```{r}
+fecundity_df <- fecundity
+
+# Include sex:
+fecundity_df$sex <- rep("female",
+                        times = nrow(fecundity_df))
+# Relabel generation:
+fecundity_df <- fecundity_df %>% 
+     mutate(generation = case_when(
+       generation == "gen0" ~ "gen0",
+       generation == "gen7" ~ "gen07",
+       generation == "gen31" ~ "gen31"))
+
+# Relabel base replicates:
+fecundity_df <- fecundity_df %>% dplyr::mutate(rep = case_when(rep == "B" & subrep == "01" ~ "01",
+                                                   rep == "B" & subrep == "02" ~ "02",
+                                                   rep == "B" & subrep == "03" ~ "03",
+                                                   rep == "B" & subrep == "04" ~ "04",
+                                                   rep == "B" & subrep == "05" ~ "05",
+                                                   rep == "B" & subrep == "06" ~ "06",
+                                                   rep == "B" & subrep == "07" ~ "07",
+                                                   rep == "B" & subrep == "08" ~ "08",
+                                                   rep == "B" & subrep == "09" ~ "09",
+                                                   rep == "B" & subrep == "10" ~ "10", TRUE ~ rep))
+
+# Aggregate evolved replicate by computing the mean of the 3 sub-replicates:
+fecundity_evo <- fecundity_df %>% dplyr::filter(treatment != "base") %>%
+  dplyr::select(generation, rep,  eggs_female) %>%
+  as.data.frame()
+fecundity_evo <- fecundity_evo %>%
+  group_by(rep, generation) %>%
+  summarise(mean_eggs_female = mean(eggs_female))
+
+# Aggregate base sub-replicate by computing the mean of the 3 sub-sub-replicates:
+fecundity_base <- fecundity_df %>% dplyr::filter(treatment == "base") %>%
+  dplyr::select(generation, subrep, eggs_female) %>%
+  as.data.frame()
+fecundity_base <- fecundity_base %>%
+  group_by(subrep, generation) %>%
+  summarise(mean_eggs_female = mean(eggs_female))
+fecundity_base <- fecundity_base %>% dplyr::rename(rep = subrep)
+
+# Join evo and base:
+fecundity_df2 <- rbind(fecundity_evo, fecundity_base)
+# Include group "sex":
+fecundity_df2$group <- "female"
+# Select 3 needed columns for the function:
+fecundity_df2 <- fecundity_df2[,2:4]
+fecundity_df2 <- fecundity_df2 %>% dplyr::select(group,
+                                                 generation,
+                                                 mean_eggs_female)
+fecundity_df2 <- as.data.frame(fecundity_df2)
+
+# Compute rates:
+#
+rates_results_F0F7 <- compute_rates_per_group(generation1 = "gen0",
+                                                    generation2 = "gen07",
+                                                    generation_lapse = 7,
+                                                    dataset = fecundity_df2,
+                                              t1=0,
+                                              t2=7)
+rates_results_F0F7$gen <- "F0toF7"
+#
+rates_results_F7F31 <- compute_rates_per_group(generation1 = "gen07",
+                                                     generation2 = "gen31",
+                                                     generation_lapse = 24,
+                                                     dataset = fecundity_df2,
+                                               t1=7,
+                                               t2=31)
+rates_results_F7F31$gen <- "F7toF31"
+#
+rates_results_F0F31 <- compute_rates_per_group(generation1 = "gen0",
+                                                     generation2 = "gen31",
+                                                     generation_lapse = 31,
+                                                     dataset = fecundity_df2,
+                                              t1=0,
+                                              t2=31)
+rates_results_F0F31$gen <- "F0toF31"
+
+# Create final data-set:
+combined_rates_fec <- rbind(rates_results_F0F7,
+                        rates_results_F0F31,
+                        rates_results_F7F31)
+
+combined_rates_fec$Darwin_Numerator <- as.numeric(combined_rates_fec$Darwin_Numerator)
+combined_rates_fec$phenotype <- rep("fecundity", times = nrow(combined_rates_fec))
+
+```
+## TAG: Females & Males
+```{r}
+TAG_df <- TAG
+
+# Relabel generation:
+TAG_df <- TAG_df %>% 
+     dplyr::mutate(generation = case_when(
+       grepl("CGE1", CGE) ~ "gen0",
+       grepl("CGE2", CGE) ~ "gen07",
+       grepl("CGE3", CGE) ~ "gen31"))
+# Relabel replicate:
+TAG_df <- TAG_df %>% dplyr::mutate(rep = case_when(grepl("B_1", sample) ~ "01",
+                                                   grepl("B_2", sample) ~ "02",
+                                                   grepl("B_3", sample) ~ "03",
+                                                   grepl("B_4", sample) ~ "04",
+                                                   grepl("B_5", sample) ~ "05",
+                                                   grepl("B_6", sample) ~ "06",
+                                                   grepl("B_7", sample) ~ "07",
+                                                   grepl("B_8", sample) ~ "08",
+                                                   grepl("B_9", sample) ~ "09",
+                                                   grepl("B_10", sample) ~ "10",
+                                                   grepl("31", sample) ~ "31",
+                                                   grepl("32", sample) ~ "32",
+                                                   grepl("33", sample) ~ "33",
+                                                   grepl("34", sample) ~ "34",
+                                                   grepl("35", sample) ~ "35",
+                                                   grepl("36", sample) ~ "36"))
+                                   
+# Aggregate evolved replicate by computing the mean of the 3 sub-replicates:
+TAG_evo <- TAG_df %>% dplyr::filter(treatment != "base") %>%
+  dplyr::select(generation, sex, rep, ug_TAG_fly) %>%
+  as.data.frame()
+TAG_evo <- TAG_evo %>%
+  group_by(rep, sex, generation) %>%
+  summarise(mean_ug_TAG_fly = mean(ug_TAG_fly))
+
+# Aggregate base sub-replicate by computing the mean of the 3 sub-sub-replicates:
+TAG_base <- TAG_df %>% dplyr::filter(treatment == "base") %>%
+  dplyr::select(generation, sex, rep, ug_TAG_fly) %>%
+  as.data.frame()
+TAG_base <- TAG_base %>%
+  group_by(rep, sex, generation) %>%
+  summarise(mean_ug_TAG_fly = mean(ug_TAG_fly))
+
+# Join evo and base:
+TAG_df2 <- rbind(TAG_evo, TAG_base)
+# Select 3 needed columns for the function:
+TAG_df2 <- TAG_df2[,2:4]
+TAG_df2 <- TAG_df2 %>% dplyr::select(sex,
+                                     generation,
+                                     mean_ug_TAG_fly)
+
+colnames(TAG_df2) <- c("group", "generation", "mean_ug_TAG_fly")
+TAG_df2 <- as.data.frame(TAG_df2)
+
+
+# Compute rates:
+#
+rates_results_F0F7 <- compute_rates_per_group(generation1 = "gen0",
+                                              generation2 = "gen07",
+                                              generation_lapse = 7,
+                                              dataset = TAG_df2,
+                                              t1=0,
+                                              t2=7)
+rates_results_F0F7$gen <- "F0toF7"
+#
+rates_results_F7F31 <- compute_rates_per_group(generation1 = "gen07",
+                                                  generation2 = "gen31",
+                                                  generation_lapse = 24,
+                                                  dataset = TAG_df2,
+                                              t1=7,
+                                              t2=31)
+rates_results_F7F31$gen <- "F7toF31"
+#
+rates_results_F0F31 <- compute_rates_per_group(generation1 = "gen0",
+                                                  generation2 = "gen31",
+                                                  generation_lapse = 31,
+                                                  dataset = TAG_df2,
+                                              t1=0,
+                                              t2=31)
+rates_results_F0F31$gen <- "F0toF31"
+
+# Create final data-set:
+combined_rates_TAG <- rbind(rates_results_F0F7,
+                        rates_results_F0F31,
+                        rates_results_F7F31)
+
+combined_rates_TAG$Darwin_Numerator <- as.numeric(combined_rates_TAG$Darwin_Numerator)
+combined_rates_TAG$phenotype <- rep("TAG", times = nrow(combined_rates_TAG))
+
+```
+## DRY WEIGHT: Females & Males
+```{r}
+dry_weight_df <- dry_weight
+# Relabel generation:
+dry_weight_df <- dry_weight_df %>% 
+     mutate(generation = case_when(
+       generation == "gen0" ~ "gen0",
+       generation == "gen7" ~ "gen07",
+       generation == "gen31" ~ "gen31"))
+
+# Include sex:
+dry_weight_df <- dry_weight_df %>%  tidyr::pivot_longer(
+                      cols = -c("CGE","rep","subrep","subsubrep",
+                                "generation","treatment","nb_females",
+                                "nb_males","total_flies",
+                                "females_g","males_g","females_mg","males_mg"), 
+                      names_to = c('sex'), values_to = c("mg_fly"))
+dry_weight_df <- dry_weight_df %>% 
+     mutate(sex = case_when(
+       sex == "mg_male" ~ "male",
+       sex == "mg_female" ~ "female")) 
+
+# Relabel replicate:
+dry_weight_df <- dry_weight_df %>% dplyr::mutate(rep = case_when(rep == "B" & subrep == "01" ~ "01",
+                                                   rep == "B" & subrep == "02" ~ "02",
+                                                   rep == "B" & subrep == "03" ~ "03",
+                                                   rep == "B" & subrep == "04" ~ "04",
+                                                   rep == "B" & subrep == "05" ~ "05",
+                                                   rep == "B" & subrep == "06" ~ "06",
+                                                   rep == "B" & subrep == "07" ~ "07",
+                                                   rep == "B" & subrep == "08" ~ "08",
+                                                   rep == "B" & subrep == "09" ~ "09",
+                                                   rep == "B" & subrep == "10" ~ "10", TRUE ~ rep))
+
+
+##
+# Aggregate evolved replicate by computing the mean of the 3 sub-replicates:
+dry_weight_evo <- dry_weight_df %>% dplyr::filter(treatment != "base") %>%
+  dplyr::select(generation, sex, rep,  mg_fly) %>%
+  as.data.frame()
+dry_weight_evo <- dry_weight_evo %>%
+  group_by(rep, sex, generation) %>%
+  summarise(mean_mg_fly = mean(mg_fly))
+
+# Aggregate base sub-replicate by computing the mean of the 3 sub-sub-replicates:
+dry_weight_base <- dry_weight_df %>% dplyr::filter(treatment == "base") %>%
+  dplyr::select(generation, sex, subrep, mg_fly) %>%
+  as.data.frame()
+dry_weight_base <- dry_weight_base %>%
+  group_by(subrep, sex, generation) %>%
+  summarise(mean_mg_fly = mean(mg_fly))
+dry_weight_base <- dry_weight_base %>% dplyr::rename(rep = subrep)
+dry_weight_base$rep <- as.character(dry_weight_base$rep)
+
+# Join evo and base:
+dry_weight_df2 <- rbind(dry_weight_evo, dry_weight_base)
+colnames(dry_weight_df2) <- c("rep","group", "generation", "mean_mg_fly")
+  
+# Select 3 needed columns for the function:
+dry_weight_df2 <- dry_weight_df2[,2:4]
+
+dry_weight_df2 <- as.data.frame(dry_weight_df2)
+
+# Compute rates:
+#
+rates_results_F0F7 <- compute_rates_per_group(generation1 = "gen0",
+                                                 generation2 = "gen07",
+                                                 generation_lapse = 7,
+                                                 dataset = dry_weight_df2,
+                                              t1=0,
+                                              t2=7)
+rates_results_F0F7$gen <- "F0toF7"
+#
+rates_results_F7F31 <- compute_rates_per_group(generation1 = "gen07",
+                                                  generation2 = "gen31",
+                                                  generation_lapse = 24,
+                                                  dataset = dry_weight_df2,
+                                              t1=7,
+                                              t2=31)
+rates_results_F7F31$gen <- "F7toF31"
+#
+rates_results_F0F31 <- compute_rates_per_group(generation1 = "gen0",
+                                                  generation2 = "gen31",
+                                                  generation_lapse = 31,
+                                                  dataset = dry_weight_df2,
+                                              t1=0,
+                                              t2=31)
+rates_results_F0F31$gen <- "F0toF31"
+
+# Create final data-set:
+combined_rates_dryW <- rbind(rates_results_F0F7,
+                        rates_results_F0F31,
+                        rates_results_F7F31)
+
+combined_rates_dryW$phenotype <- rep("dry_weight", times = nrow(combined_rates_dryW))
+
+```
+# Create HO_pheno_rates dataset:
+```{r}
+# Combine Haldane data-sets:
+HO_pheno_rates <- rbind(combined_rates_fec, combined_rates_dryW, combined_rates_TAG)
+
+# Include phenotype level group:
+HO_pheno_rates$pheno_level <- "high_order_phenotype"
+# Select needed columns:
+#HO_pheno_rates <- HO_pheno_rates %>% dplyr::select(c(phenotype, pheno_level, gen, group, Haldanes))
+# Rename group:
+HO_pheno_rates <- HO_pheno_rates %>% dplyr::rename(sex = group)
+# Include combined phenotype_sex group:
+HO_pheno_rates$phenotype_sex <- paste(HO_pheno_rates$phenotype, HO_pheno_rates$sex, sep = "_")
+# Format variables:
+HO_pheno_rates$gen <- factor(HO_pheno_rates$gen)
+HO_pheno_rates$sex <- factor(HO_pheno_rates$sex)
+HO_pheno_rates$phenotype_sex <- factor(HO_pheno_rates$phenotype_sex)
+HO_pheno_rates$pheno_level <- factor(HO_pheno_rates$pheno_level)
+
+# Include gen_interval:
+HO_pheno_rates <- HO_pheno_rates %>% dplyr::mutate(gen_interval = case_when(gen == "F0toF7" ~ 7,
+                                                                    gen == "F0toF31" ~ 31,
+                                                                    gen == "F7toF31" ~ 24))
+
+HO_pheno_rates <- HO_pheno_rates %>% dplyr::mutate(gen2 = case_when(gen == "F0toF7" ~ 7,
+                                                                    gen == "F0toF31" ~ 31,
+                                                                    gen == "F7toF31" ~ 24))
+
+# Include study:
+HO_pheno_rates$study <- "HigProtein_BigCages"
+
+```
+# Part 3: plotting
+## Darwin numerator per High Order phenotype:
+```{r}
+
+HO_pheno_rates %>% dplyr::filter(gen %in% c("F0toF7", "F7toF31")) %>%
+  ggplot( aes(x = gen, y = abs(Darwin_Numerator),
+             group = phenotype_sex)) +
+  geom_point(aes(shape=sex, color = phenotype), size = 3) +
+  geom_line(aes(color = phenotype), linewidth = 1) +  
+  ylab("Abs. Darwin Numerator") +
+  xlab("Time interval (generations)") +
+  scale_colour_manual(name = "Phenotype",
+                      labels = c("Dry weight", "Fecundity", "TAG"),
+                      values = c(color_dry_weight,
+                                 color_fecundity,
+                                 color_lipid)) + 
+    scale_shape_manual(name = "Sex",
+                      labels = c("Female", "Male"),
+                      values = c(25, 17)) +
+  scale_x_discrete(labels = c("0 to 7", "7 to 31"),
+                   expand = c(0.2, 0)) +
+  theme_classic() +
+theme(aspect.ratio =1.5/1,
+        plot.margin = margin(0, 0, 0, 0),
+        axis.text = element_text(size = 16, color = "black"),
+        axis.title = element_text(size = 16, color = "black"),
+    axis.line = element_line(color='black'),
+    plot.background = element_blank(),
+    panel.background = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    legend.position="bottom",
+    legend.text = element_text(size = 16)) + coord_cartesian(ylim=c(0, 1.3))
+
+
+```
+```{r}
+HO_pheno_rates %>% dplyr::filter(gen %in% c("F0toF7", "F0toF31")) %>%
+  ggplot( aes(x = gen, y = abs(Darwin_Numerator),
+             group = phenotype_sex)) +
+  geom_point(aes(shape=sex, color = phenotype), size = 3) +
+  geom_line(aes(color = phenotype), linewidth = 1) +  
+  ylab("Abs. Darwin Numerator") +
+  xlab("Time interval (generations)") +
+  scale_colour_manual(name = "Phenotype",
+                      labels = c("Dry weight", "Fecundity", "TAG"),
+                      values = c(color_dry_weight,
+                                 color_fecundity,
+                                 color_lipid)) + 
+    scale_shape_manual(name = "Sex",
+                      labels = c("Female", "Male"),
+                      values = c(25, 17)) +
+  scale_x_discrete(labels = c("0 to 7", "0 to 31"),
+                   expand = c(0.2, 0)) +
+  theme_classic() +
+theme(aspect.ratio =1.5/1,
+        plot.margin = margin(0, 0, 0, 0),
+        axis.text = element_text(size = 16, color = "black"),
+        axis.title = element_text(size = 16, color = "black"),
+    axis.line = element_line(color='black'),
+    plot.background = element_blank(),
+    panel.background = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    legend.position="bottom",
+    legend.text = element_text(size = 16)) + coord_cartesian(ylim=c(0, 1.3))
+
+```
+# ### Compute rates Additional Studies ###
+## Process Mallard et al., data:
+# ### Metabolic rate
+```{r}
+metabolic_rate_Mallard$Evol <- factor(metabolic_rate_Mallard$Evol, levels = c("B", "C", "H")) 
+# Change sex label:
+metabolic_rate_Mallard <- metabolic_rate_Mallard %>% dplyr::mutate(Sex = case_when(Sex == "F" ~ "female",
+                                                                                   Sex == "M" ~ "male"))
+metabolic_rate_Mallard %>% ggplot(aes(x = Evol, y = CO2_L_min_fly)) +
+  geom_bar(aes(fill = Evol),stat = "summary", fun.y = "mean") +
+  scale_fill_manual(values=c("chartreuse3","cornflowerblue","firebrick3")) +
+  theme_classic() + facet_wrap(~ Sex)
+
+```
+# ### Fecundity rate
+```{r}
+fecundity_Mallard_processed <- fecundity_Mallard
+
+# Exclude melanogaster from study:
+fecundity_Mallard_processed <- fecundity_Mallard_processed %>% dplyr::filter(species == "simulans")
+# Include number of females:
+fecundity_Mallard_processed <- dplyr::left_join(fecundity_Mallard_processed, fecundity_Mallard_counts, by = "id")
+# Aggregate data so number of females is added for 5 days.
+fecundity_Mallard_processed_total <- aggregate(eggs ~ id + 
+                                   female,
+                                  data = fecundity_Mallard_processed, 
+                                  FUN = sum,
+                                 na.rm = TRUE)
+# Compute total fecundity:
+fecundity_Mallard_processed_total$egg_fly <- fecundity_Mallard_processed_total$eggs / fecundity_Mallard_processed_total$female
+# Compute fecundity per day:
+fecundity_Mallard_processed_total$egg_fly_day <- fecundity_Mallard_processed_total$egg_fly / 6
+
+# Include population label (?):
+fecundity_Mallard_processed_total <- fecundity_Mallard_processed_total %>%
+  mutate(
+    rep = as.numeric(str_extract(id, "\\d+")),  
+    suffix = str_extract(id, "[a-zA-Z]+"))
+table(fecundity_Mallard_processed_total$suffix, fecundity_Mallard_processed_total$rep)
+fecundity_Mallard_processed_total <- fecundity_Mallard_processed_total %>%
+  mutate(population = case_when(rep %in% c(1,2,3,4,5) ~ "C",
+                                rep %in% c(6,7,8,9,10) ~ "H",
+                                rep %in% c(11,12,13,14,15) ~ "B"))
+
+# Plotting:
+fecundity_Mallard_processed_total$population <- factor(fecundity_Mallard_processed_total$population, levels = c("B", "C", "H")) 
+fecundity_Mallard_processed_total %>% ggplot(aes(x = population, y = egg_fly_day)) +
+  geom_bar(aes(fill = population), stat = "summary", fun.y = "mean") +
+  scale_fill_manual(values=c("chartreuse3","cornflowerblue","firebrick3")) +
+  theme_classic() +
+  facet_wrap(~ suffix)
+
+```
+After comparing to the Fig E in the paper, I think sZ is the good one. 
+```{r}
+fecundity_Mallard_processed_total <- fecundity_Mallard_processed_total %>% dplyr::filter(suffix == "sZ")
+
+```
+
+# # Part 1: Compute rates for High order phenotypes
+## FECUNDITY RUDMAN:
+The sub-replicates of the evolved populations are aggregated by the mean so
+there is only one measurement per replicate and generation.
+
+In Rudman et. al., Fecundity was phenotyped in 4 sample events or CGE (sample column).
+The number of generations lapses were added as an extra column (Generations)
+by approximating each generation as 12 days since Rudman et. al.,
+don´t provide with this information as they have overlapping generations. 
+```{r}
+table(fecundity_Rudman$cage, fecundity_Rudman$sample)
+
+# Remove rows containing NAs:
+fecundity_Rudman <- na.omit(fecundity_Rudman)
+
+table(fecundity_Rudman$cage, fecundity_Rudman$sample)
+```
+
+```{r}
+fecundity_df <- fecundity_Rudman
+
+# Aggregate evolved replicate by computing the mean of the 20 sub-replicates:
+fecundity_df2 <- fecundity_df %>%
+  dplyr::select(sample, cage,  totalfecund) %>%
+  as.data.frame()
+fecundity_df2 <- fecundity_df2 %>%
+  group_by(cage, sample) %>%
+  summarise(mean_eggs_female = mean(totalfecund)) %>% ungroup()
+# Include group variable:
+fecundity_df2$group <- "female"
+# Select needed columns:
+fecundity_df2 <- fecundity_df2 %>% dplyr::select(group, sample, mean_eggs_female)
+# Rename column names:
+colnames(fecundity_df2) <- c("group", "generation", "phenotype")
+# Factor generation:
+fecundity_df2$generation <- as.character(fecundity_df2$generation)
+fecundity_df2 <- as.data.frame(fecundity_df2)
+
+# Compute rates:
+#
+rates_a <- compute_rates_per_group(generation1 = "one",
+                                   generation2 = "two",
+                                   generation_lapse = 2,
+                                   dataset = fecundity_df2,
+                                   t1 = 1, t2 = 3)
+rates_a$time_interval <- "oneTOtwo"
+
+rates_b <- compute_rates_per_group(generation1 = "two",
+                                   generation2 = "three",
+                                   generation_lapse = 2,
+                                   dataset = fecundity_df2,
+                                   t1 = 3, t2 = 5)
+rates_b$time_interval <- "twoTOthree"
+
+rates_c <- compute_rates_per_group(generation1 = "three",
+                                   generation2 = "four",
+                                   generation_lapse = 2,
+                                   dataset = fecundity_df2,
+                                   t1 = 5, t2 = 7)
+rates_c$time_interval <- "threeTOfour"
+
+
+rates_d <- compute_rates_per_group(generation1 = "one",
+                                   generation2 = "three",
+                                   generation_lapse = 4,
+                                   dataset = fecundity_df2,
+                                   t1 = 1, t2 = 5)
+rates_d$time_interval <- "oneTOthree"
+
+rates_e <- compute_rates_per_group(generation1 = "one",
+                                   generation2 = "four",
+                                   generation_lapse = 6,
+                                   dataset = fecundity_df2,
+                                   t1 = 1, t2 = 7)
+rates_e$time_interval <- "oneTOfour"
+
+
+# Combine results:
+fecundity_rates_Rudman_df <- rbind(rates_a, rates_b, rates_c, rates_d, rates_e)
+
+# Add study:
+fecundity_rates_Rudman_df$study <- "Big_Cages_Rudman"
+# Add phenotype:
+fecundity_rates_Rudman_df$phenotype <- "fecundity"
+# Add regime:
+fecundity_rates_Rudman_df$regime <- "outdoor"
+
+fecundity_rates_Rudman_df
+
+```
+# Plot - 1
+```{r}
+
+plot_df <- fecundity_rates_Rudman_df %>% dplyr::filter(time_interval %in% c("oneTOtwo",
+                                                      "twoTOthree",
+                                                      "threeTOfour"))
+
+plot_df$time_interval <- factor(plot_df$time_interval,
+                                           levels = c("oneTOtwo",
+                                                      "twoTOthree",
+                                                      "threeTOfour"))
+
+plot_df %>%
+  ggplot(aes(x = time_interval, y = abs(Darwin_Numerator), group = group)) +
+  geom_point(aes(color= group), size = 6) + 
+  geom_line(aes(color = group), linewidth = 1) +  
+  ylab("Abs. Darwin Numerator") +
+  xlab("Approximate elapsed time (generations)") +
+  scale_color_manual(name = "",
+                      labels = c( "Fecundity"),
+                      values = c(color_fecundity)) +
+  scale_x_discrete(labels = c("4", "6", "8"),
+                   expand = c(0.2, 0)) +
+  theme_classic() +
+theme(aspect.ratio =1.5/1,
+        plot.margin = margin(0, 0, 0, 0),
+        axis.text = element_text(size = 16, color = "black"),
+        axis.title = element_text(size = 16, color = "black"),
+    axis.line = element_line(color='black'),
+    plot.background = element_blank(),
+    panel.background = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    legend.position="bottom",
+    legend.text = element_text(size = 16)) + coord_cartesian(ylim=c(0, 1.3))
+
+
+##
+
+
+plot_df <- fecundity_rates_Rudman_df %>% dplyr::filter(time_interval %in% c("oneTOtwo","oneTOthree","oneTOfour"))
+
+plot_df$time_interval <- factor(plot_df$time_interval,
+                                           levels = c("oneTOtwo",
+                                                      "oneTOthree",
+                                                      "oneTOfour"))
+
+plot_df %>%
+  ggplot(aes(x = time_interval, y = abs(Darwin_Numerator), group = group)) +
+  geom_point(aes(color= group), size = 6) + 
+  geom_line(aes(color = group), linewidth = 1) +  
+  ylab("Abs. Darwin Numerator") +
+  xlab("Approximate elapsed time (generations)") +
+  scale_color_manual(name = "",
+                      labels = c( "Fecundity"),
+                      values = c(color_fecundity)) +
+  scale_x_discrete(labels = c("4", "6", "8"),
+                   expand = c(0.2, 0)) +
+  theme_classic() +
+theme(aspect.ratio =1.5/1,
+        plot.margin = margin(0, 0, 0, 0),
+        axis.text = element_text(size = 16, color = "black"),
+        axis.title = element_text(size = 16, color = "black"),
+    axis.line = element_line(color='black'),
+    plot.background = element_blank(),
+    panel.background = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    legend.position="bottom",
+    legend.text = element_text(size = 16)) + coord_cartesian(ylim=c(0, 1.3))
+
+```
+
+# ##
+## FECUNDITY BARGHI:
+```{r}
+# Compute fecundity per female
+fecundity_Barghi$egg_fly <- fecundity_Barghi$Egg_Num /fecundity_Barghi$Female_Num
+
+```
+
+```{r}
+fecundity_df <- fecundity_Barghi
+
+# Aggregate evolved replicate by computing the mean of the 3 sub-replicates:
+fecundity_df2 <- fecundity_df %>%
+  dplyr::select(Pop, dummy_rep, egg_fly) %>%
+  as.data.frame()
+fecundity_df2 <- fecundity_df2 %>%
+  group_by(dummy_rep, Pop) %>%
+  summarise(mean_eggs_female = mean(egg_fly)) %>% ungroup()
+# Include group variable:
+fecundity_df2$group <- "female"
+# Select needed columns:
+fecundity_df2 <- fecundity_df2 %>% dplyr::select(group, Pop, mean_eggs_female)
+# Rename column names:
+colnames(fecundity_df2) <- c("group", "generation", "phenotype")
+# Factor generaion:
+fecundity_df2$generation <- as.character(fecundity_df2$generation)
+fecundity_df2 <- as.data.frame(fecundity_df2)
+# Compute rates:
+#
+rates_results_F0toF103 <- compute_rates_per_group(generation1 = "B",
+                                                    generation2 = "H",
+                                                    generation_lapse = 103,
+                                                    dataset = fecundity_df2,
+                                                    t1=0, t2=103)
+rates_results_F0toF103$time_interval <- "F0toF103"
+
+
+# Combine results:
+fecundity_rates_Barghi_df <- rates_results_F0toF103
+fecundity_rates_Barghi_df
+
+# Add study:
+fecundity_rates_Barghi_df$study <- "Hot_temperature_adapt_Barghi"
+# Add phenotype:
+fecundity_rates_Barghi_df$phenotype <- "fecundity"
+# Add regime:
+fecundity_rates_Barghi_df$regime <- "hot"
+
+
+```
+## METABOLIC RATE BARGHI:
+```{r}
+Met_rate_df <- metabolic_rate_Barghi
+
+# Change sex label:
+Met_rate_df <- Met_rate_df %>%
+  dplyr::mutate(Sex = case_when(Sex == "F" ~ "female",
+                                Sex == "M" ~ "male"))
+
+# Aggregate evolved replicate by computing the mean of the 3 sub-replicates:
+Met_rate_df2 <- Met_rate_df %>%
+  dplyr::select(Pop, Sex, dummy_rep, CO2PerMg) %>%
+  as.data.frame()
+Met_rate_df2 <- Met_rate_df2 %>%
+  group_by( Pop, Sex, dummy_rep) %>%
+  summarise(mean_met_rate = mean(CO2PerMg)) %>% ungroup()
+# Include group variable:
+Met_rate_df2$group <- Met_rate_df2$Sex
+# Select needed columns:
+Met_rate_df2 <- Met_rate_df2 %>% dplyr::select(group, Pop, mean_met_rate)
+# Rename column names:
+colnames(Met_rate_df2) <- c("group", "generation", "phenotype")
+# Factor generation:
+Met_rate_df2$generation <- as.factor(Met_rate_df2$generation)
+Met_rate_df2 <- as.data.frame(Met_rate_df2)
+# Compute rates:
+#
+rates_results_F0toF113 <- compute_rates_per_group(generation1 = "B",
+                                                  generation2 = "H",
+                                                  generation_lapse = 113,
+                                                  dataset = Met_rate_df2,
+                                                  t1=0, t2=113)
+rates_results_F0toF113$time_interval <- "F0toF113"
+
+
+# Combine results:
+met_rate_rates_df <- rates_results_F0toF113
+met_rate_rates_df
+
+
+# Add study:
+met_rate_rates_df$study <- "Hot_temperature_adapt_Barghi"
+# Add phenotype:
+met_rate_rates_df$phenotype <- "metabolic_rate"
+# Add regime:
+met_rate_rates_df$regime <- "hot"
+
+```
+## DRY WEIGHT from Metabolic rate:
+```{r}
+
+# Aggregate evolved replicate by computing the mean of the 3 sub-replicates:
+Dry_weight_df2 <- Met_rate_df %>%
+  dplyr::select(Pop, Sex, dummy_rep, Dry_Weight) %>%
+  as.data.frame()
+Dry_weight_df2 <- Dry_weight_df2 %>%
+  group_by( Pop, Sex, dummy_rep) %>%
+  summarise(mean_dry_weight = mean(Dry_Weight)) %>% ungroup()
+# Include group variable:
+Dry_weight_df2$group <- Dry_weight_df2$Sex
+# Select needed columns:
+Dry_weight_df2 <- Dry_weight_df2 %>% dplyr::select(group, Pop, mean_dry_weight)
+# Rename column names:
+colnames(Dry_weight_df2) <- c("group", "generation", "phenotype")
+# Factor generaion:
+Dry_weight_df2$generation <- as.factor(Dry_weight_df2$generation)
+Dry_weight_df2 <- as.data.frame(Dry_weight_df2)
+
+# Compute rates:
+#
+rates_results_F0toF113 <- compute_rates_per_group(generation1 = "B",
+                                                    generation2 = "H",
+                                                    generation_lapse = 60,
+                                                    dataset = Dry_weight_df2,
+                                                  t1=0, t2=113)
+rates_results_F0toF113$time_interval <- "F0toF113"
+
+
+# Combine results:
+dry_weight_met_rate_rates_df <- rates_results_F0toF113
+dry_weight_met_rate_rates_df
+
+# Add study:
+dry_weight_met_rate_rates_df$study <- "Hot_temperature_adapt_Barghi"
+# Add phenotype:
+dry_weight_met_rate_rates_df$phenotype <- "dry_weight"
+# Add regime:
+dry_weight_met_rate_rates_df$regime <- "hot"
+
+```
+## TAG BARGHI:
+```{r}
+TAG_df <- TAG_Barghi
+
+# Change sex label:
+TAG_df <- TAG_df %>%
+  dplyr::mutate(Sex = case_when(Sex == "F" ~ "female",
+                                Sex == "M" ~ "male"))
+
+# Aggregate evolved replicate by computing the mean of the 3 sub-replicates:
+TAG_df2 <- TAG_df %>%
+  dplyr::select(Pop, Sex, dummy_rep, LperFly) %>%
+  as.data.frame()
+TAG_df2 <- TAG_df2 %>%
+  group_by( Pop, Sex, dummy_rep) %>%
+  summarise(mean_TAG_fly = mean(LperFly)) %>% ungroup()
+# Include group variable:
+TAG_df2$group <- TAG_df2$Sex
+# Select needed columns:
+TAG_df2 <- TAG_df2 %>% dplyr::select(group, Pop, mean_TAG_fly)
+# Rename column names:
+colnames(TAG_df2) <- c("group", "generation", "phenotype")
+# Factor generaion:
+TAG_df2$generation <- as.factor(TAG_df2$generation)
+TAG_df2 <- as.data.frame(TAG_df2)
+
+# Compute rates:
+#
+rates_results_F0toF124 <- compute_rates_per_group(generation1 = "B",
+                                                  generation2 = "H",
+                                                  generation_lapse = 124,
+                                                  dataset = TAG_df2,
+                                                  t1=0, t2=124)
+rates_results_F0toF124$time_interval <- "F0toF124"
+
+
+# Combine results:
+TAG_fly_rates_df <- rates_results_F0toF124
+# Add study:
+TAG_fly_rates_df$study <- "Hot_temperature_adapt_Barghi"
+# Add phenotype:
+TAG_fly_rates_df$phenotype <- "TAG"
+# Add regime:
+TAG_fly_rates_df$regime <- "hot"
+
+TAG_fly_rates_df
+
+```
+# ##
+## METABOLIC RATE MALLARD:
+I don´t average sub-replciates because of insufficient samples. 
+```{r}
+
+Met_rate_df <- metabolic_rate_Mallard 
+# Select needed columns:
+Met_rate_df <- Met_rate_df %>% dplyr::select(Sex, Evol, CO2_L_min_fly)
+# Rename column names:
+colnames(Met_rate_df) <- c("group", "generation", "phenotype")
+# Factor generation:
+Met_rate_df$generation <- as.factor(Met_rate_df$generation)
+Met_rate_df <- as.data.frame(Met_rate_df)
+
+## Hot evolved:
+# Compute rates:
+#
+rates_results_F0toF64_Hot <- compute_rates_per_group(generation1 = "B",
+                                                    generation2 = "H",
+                                                    generation_lapse = 64,
+                                                    dataset = Met_rate_df,
+                                                    t1=0, t2=64)
+# Add information:
+rates_results_F0toF64_Hot$time_interval <- "F0toF64"
+rates_results_F0toF64_Hot$regime <- "hot"
+#rates_results_F0toF64_Hot$generation <- "64"
+# Add study:
+rates_results_F0toF64_Hot$study <- "Hot_temperature_adapt_Mallard"
+
+
+## Cold evolved:
+# Compute rates:
+#
+rates_results_F0toF39_Cold <- compute_rates_per_group(generation1 = "B",
+                                                    generation2 = "C",
+                                                    generation_lapse = 39,
+                                                    dataset = Met_rate_df, 
+                                                    t1=0, t2=39)
+rates_results_F0toF39_Cold$time_interval <- "F0toF39"
+rates_results_F0toF39_Cold$regime <- "cold"
+#rates_results_F0toF39_Cold$generation <- "39"
+# Add study:
+rates_results_F0toF39_Cold$study <- "Cold_temperature_adapt_Mallard"
+
+# Combine results:
+met_rate_rates_Mallard_df <- rbind(rates_results_F0toF64_Hot, rates_results_F0toF39_Cold)
+#met_rate_rates_Mallard_df$CGE <- "23degrees"
+
+# Add phenotype:
+met_rate_rates_Mallard_df$phenotype <- "metabolic_rate"
+
+# Select columns to coincide with other datasets:
+met_rate_rates_Mallard_df <- met_rate_rates_Mallard_df %>%
+  dplyr::select(group, n1, n2, y1, y2, SD1, SD2, pooled_SD, Haldanes, Haldane_Numerator,
+                Darwin_Numerator, time_lapse_million_years, Darwins, time_interval, study, phenotype, regime)
+met_rate_rates_Mallard_df
+
+```
+
+## FECUNDITY MALLARD:
+I don´t average sub-replciates because of insufficient samples. 
+```{r}
+fecundity_df <- fecundity_Mallard_processed_total 
+# Include group variable:
+fecundity_df$group <- paste("female")
+# Select needed columns:
+fecundity_df <- fecundity_df %>% dplyr::select(group, population, egg_fly_day)
+
+# Rename column names:
+colnames(fecundity_df) <- c("group", "generation", "phenotype")
+# Factor generation:
+fecundity_df$generation <- as.factor(fecundity_df$generation)
+fecundity_df <- as.data.frame(fecundity_df)
+
+## Hot evolved:
+# Compute rates:
+#
+fecundity_results_F0toF64_Hot <- compute_rates_per_group(generation1 = "B",
+                                                    generation2 = "H",
+                                                    generation_lapse = 64,
+                                                    dataset = fecundity_df,
+                                                    t1=0, t2=64)
+fecundity_results_F0toF64_Hot$time_interval <- "F0toF64"
+fecundity_results_F0toF64_Hot$regime <- "hot"
+fecundity_results_F0toF64_Hot$study <- "Hot_temperature_adapt_Mallard"
+
+
+## Cold evolved:
+# Compute rates:
+#
+fecundity_results_F0toF39_Cold <- compute_rates_per_group(generation1 = "B",
+                                                    generation2 = "C",
+                                                    generation_lapse = 39,
+                                                    dataset = fecundity_df,
+                                                    t1=0, t2=39)
+fecundity_results_F0toF39_Cold$time_interval <- "F0toF39"
+fecundity_results_F0toF39_Cold$regime <- "cold"
+fecundity_results_F0toF39_Cold$study <- "Cold_temperature_adapt_Mallard"
+
+# Combine results:
+fecundity_results_Mallard_df <- rbind(fecundity_results_F0toF64_Hot, fecundity_results_F0toF39_Cold)
+#fecundity_results_Mallard_df$CGE <- "23degrees"
+# Add phenotype:
+fecundity_results_Mallard_df$phenotype <- "fecundity"
+# Select columns to coincide with other datasets:
+fecundity_results_Mallard_df <- fecundity_results_Mallard_df %>%
+  dplyr::select(group, n1, n2, y1, y2, SD1, SD2, pooled_SD, Haldanes, Haldane_Numerator,
+                Darwin_Numerator, time_lapse_million_years, Darwins, time_interval, study, phenotype, regime)
+
+fecundity_results_Mallard_df
+
+```
+# ##
+# Combie all rates datasets:
+```{r}
+combined_rates_df <- rbind(fecundity_rates_Rudman_df,
+                           fecundity_rates_Barghi_df,
+                           met_rate_rates_df,
+                           dry_weight_met_rate_rates_df,
+                           TAG_fly_rates_df,
+                           fecundity_results_Mallard_df,
+                           met_rate_rates_Mallard_df)
+combined_rates_df <- combined_rates_df %>% dplyr::rename(sex = group)
+
+# Include our study:
+our_study <- HO_pheno_rates %>%
+  dplyr::select(sex, n1, n2, y1, y2, SD1, SD2, pooled_SD,
+                Haldanes, Haldane_Numerator,
+                Darwin_Numerator, time_lapse_million_years, Darwins, gen, study, phenotype)
+# Include regime:
+our_study$regime <- "high_protein"
+
+# Rename gen:
+our_study <- dplyr::rename(our_study, time_interval = gen)
+
+# Change colnames:
+colnames(our_study) <- colnames(combined_rates_df)
+combined_rates_df <- rbind(combined_rates_df, our_study)
+boxplot(abs(combined_rates_df$Darwin_Numerator))
+
+
+```
+# Plot - 5 Fig 4.A  overlapping rates 
+```{r}
+plot_df <- combined_rates_df 
+
+# Relevel phenotypes:
+plot_df$phenotype <- factor(plot_df$phenotype, levels = c("fecundity", "dry_weight", "TAG", "metabolic_rate"))
+plot_df$study <- factor(plot_df$study, levels = c("Big_Cages_Rudman",
+                                                  "HigProtein_BigCages",
+                                                  "Hot_temperature_adapt_Barghi",
+                                                  "Hot_temperature_adapt_Mallard",
+                                                  "Cold_temperature_adapt_Mallard"))
+
+
+plot_df$time_interval <- as.factor(plot_df$time_interval)
+
+plot_df2 <- plot_df %>% dplyr::filter(!time_interval %in% c("twoTOthree",
+                                                            "threeTOfour",
+                                                            "F7toF31")) %>% droplevels()
+# Relevel time_intervals:
+plot_df2$time_interval <- factor(plot_df2$time_interval, levels = c("oneTOfour",  
+                                                                    "oneTOthree",
+                                                                    "oneTOtwo",
+                                                                    "F0toF7",
+                                                                    "F0toF103",
+                                                                    "F0toF31",
+                                                                    "F0toF39", 
+                                                                    "F0toF64",
+                                                                    "F0toF113",
+                                                                    "F0toF124"))
+set.seed(2)
+plot_df2 %>%
+  ggplot(aes(x = study, y = abs(Darwin_Numerator))) +
+  geom_point(
+  aes(fill = phenotype, shape = sex, color = time_interval),
+  size = 6,
+  stroke = 1,
+  position = position_jitterdodge(jitter.width = 0.5, dodge.width = 0.6)) +
+    scale_shape_manual(values = c(21, 22)) +
+  scale_fill_manual(name = "",
+                      values = c(color_fecundity,
+                                 "#fb8072",
+                                 "#fdb462",
+                                 "#06d1f3"),
+                     labels = c("Fecundity",
+                                "Weight",
+                                "TAG",
+                                "Metabolic rate")) + 
+  scale_color_manual(name = "",  
+                     values = c("transparent",
+                                "transparent",
+                                "transparent",
+                                "black",
+                                "transparent",
+                                "transparent",
+                                "transparent",
+                                "transparent",
+                                "transparent",
+                                "transparent")) + guides(color = "none") +
+  scale_x_discrete(labels = c("Big_Cages_Rudman" = "Outdoor cages",
+                                "HigProtein_BigCages" = "LNS - High Protein",
+                                "Hot_temperature_adapt_Barghi" = "LNS - Hot I",
+                                "Hot_temperature_adapt_Mallard" = "LNS - Hot II",
+                                "Cold_temperature_adapt_Mallard" = "LNS - Cold")) + 
+    ylab("Abs. Darwin Numerator") +
+  xlab("Study") +
+  theme_classic() + 
+theme(
+        axis.text = element_text(size = 14, color = "black"),
+        axis.title = element_text(size = 14, color = "black"),
+    axis.line = element_line(color='black'),
+    plot.background = element_blank(),
+    panel.background = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    legend.position = "right",
+    legend.text = element_text(size = 14),
+    axis.text.x = element_text(angle = 0)) +
+  coord_cartesian(ylim=c(0, 1.5))  +
+  scale_y_continuous(breaks = pretty(plot_df2$Darwin_Numerator, n = 10)) +
+  coord_cartesian(ylim = c(0, 1.4)) +
+  guides(fill = guide_legend(override.aes = list(color = NA,
+  fill = c(color_fecundity, "#fb8072", "#fdb462", "#06d1f3"),
+  shape = 21)))
+  
+#ggsave("output_files/plots/Darwins/Darwins_HO_5_studies_overlapping_notime.svg", last_plot(), units="mm", width=300, height = 150)
+  
+```
+# Export all rates:
+```{r}
+export_df <- combined_rates_df
+#write_csv(export_df, "output_files/Darwin_numerators_all_studies_HighOrder_pheno.csv")
+
+```
+
+--- END ---
+

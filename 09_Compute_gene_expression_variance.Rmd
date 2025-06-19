@@ -1,0 +1,678 @@
+---
+title: "High-Protein BigCages - compute gene expression variance"
+Author: "Claudia Ramirez-lanzas"
+Date: "27/05/2024"
+---
+
+# Load libraries:
+```{r}
+# Plotting:
+library("readxl") 
+library("writexl") 
+library("tidyverse") 
+
+# Plotting
+library("khroma") # plotting colour blind safe
+library("ggplot2") 
+library("patchwork") # to combine plots
+library("svglite") 
+library("egg") #
+library("RColorBrewer") 
+library("ggbreak")
+
+```
+# Set-up colors:
+```{r}
+bright <- color("bright")
+plot_scheme(bright(6), colours = TRUE, names = TRUE, size = 0.9)
+#
+muted <- color("muted")
+plot_scheme(muted(9), colours = TRUE, names = TRUE, size = 0.9)
+
+color_plateau <- muted(9)[2] #"#332288"
+color_monotonic <- muted(9)[7] #"#44AA99"
+color_late_response <-  "#D4AF37"
+color_incomplete_reversed <- muted(9)[9] #"#AA4499"
+color_complete_reversed <- muted(9)[5] #"#88CCEE" 
+color_shared <- muted(9)[1] #"#CC6677" 
+
+plot_scheme(muted(9)[2], colours = TRUE, names = TRUE, size = 0.9)
+plot_scheme(muted(9)[7], colours = TRUE, names = TRUE, size = 0.9)
+plot_scheme(muted(9)[9], colours = TRUE, names = TRUE, size = 0.9)
+plot_scheme(muted(9)[3], colours = TRUE, names = TRUE, size = 0.9)
+plot_scheme(muted(9)[5], colours = TRUE, names = TRUE, size = 0.9)
+plot_scheme(muted(9)[1], colours = TRUE, names = TRUE, size = 0.9)
+
+
+```
+# Import files:
+```{r}
+classify_df <- read_csv("input_files/classify_trajectories_df.csv", show_col_types = FALSE)
+
+count_table <- read.delim("input_files/count_table.csv", sep=";")
+count_table <- count_table %>% column_to_rownames(var = "gene_id")
+
+```
+
+*classify_df: contains all genes classified by transcriptomic
+trajectory along with the results of DE analysis. This dataset was generated in
+08_Transcriptomic_trajectories notebook.
+
+*count_table: .csv file  containing the RNA count table (the output of
+featureCounts function from subRead).
+
+# # Part 1: compute variance - per gene 
+Here we compute the variance of each gene´s expression across replicates
+within each generation.
+# Estimate library size:
+Library size = Total number of fragments (paired ends) mapped to the genome. 
+```{r}
+lib_size <- colSums(count_table)
+hist(lib_size)
+average_library_size <- mean(lib_size) # 10 millions
+average_library_size
+
+```
+### Remove lowly expressed genes:
+With an average library size of around 10M, a CPM =  1 corresponds to 10 counts 
+per library.
+We remove genes with <10 counts per library in 1 or more samples.
+
+Following criteria in:
+Chen Y, Lun ATL and Smyth GK. From reads to genes to pathways:
+differential expression analysis of RNA-Seq experiments using 
+Rsubread and the edgeR quasi-likelihood pipeline [version 2; 
+peer review: 5 approved]. F1000Research 2016, 5:1438
+(https://doi.org/10.12688/f1000research.8987.2)
+
+```{r}
+#Set CPM threshold:
+CPM_threshold <- 1 
+
+# Create filtered count table:
+count_table_filt <- count_table[apply(cpm(count_table), 1, function(x){!(sum(x < CPM_threshold) >= 1)}),] # If there is one sample or more with CPM < threshold then the gene is filtered out. 
+
+# print filtering summary:
+paste("all genes:", nrow(count_table))
+paste("genes available after filtering:", nrow(count_table_filt))
+paste("genes discarded", nrow(count_table) - nrow(count_table_filt))
+paste("% genes discarded" , ((nrow(count_table) - nrow(count_table_filt))/nrow(count_table))*100)
+
+```
+### Prepare the data-set
+```{r}
+gene_per_group <- classify_df %>% dplyr::select(gene_id, group, direction, full_group)
+
+# Get the gene_id of all genes: (after filtering low expression)
+all_genes_id <- gene_per_group %>% dplyr::select("gene_id")
+
+# Get count table after filtering low expression:
+count_all_genes <- count_table_filt 
+
+# Compute log2CPM: (log = FALSE)
+log2cpm_all_genes <- edgeR::cpm(as.matrix(count_all_genes), 
+       normalized.lib.sizes = TRUE,
+       log = TRUE)
+
+# Gene_id to column:
+count_all_genes <- rownames_to_column(as.data.frame(count_all_genes), var = "gene_id") 
+
+# Include group information: 
+log2cpm_all_genes <- rownames_to_column(as.data.frame(log2cpm_all_genes), var = "gene_id") 
+log2cpm_all_genes_group <- left_join(log2cpm_all_genes, gene_per_group, by = "gene_id")
+log2cpm_all_genes_group <- relocate(log2cpm_all_genes_group, group, .after = gene_id)
+log2cpm_all_genes_group <- relocate(log2cpm_all_genes_group, direction, .after = group)
+log2cpm_all_genes_group <- relocate(log2cpm_all_genes_group, full_group, .after = direction)
+
+# Order column names (samples) alphabetically: 
+log2cpm_all_genes_group <- log2cpm_all_genes_group %>% dplyr::select(order(colnames(log2cpm_all_genes_group)))
+log2cpm_all_genes_group <- log2cpm_all_genes_group %>% dplyr::relocate(gene_id, .before = CGE1_rep_B_1)
+log2cpm_all_genes_group <- log2cpm_all_genes_group %>% dplyr::relocate(group, .before = CGE1_rep_B_1)
+log2cpm_all_genes_group <- log2cpm_all_genes_group %>% dplyr::relocate(direction, .before = CGE1_rep_B_1)
+log2cpm_all_genes_group <- log2cpm_all_genes_group %>% dplyr::relocate(full_group, .before = CGE1_rep_B_1)
+
+```
+## Compute the mean CPM of sub-replicates:
+The expression of the sub-replicates of each evolved replicate
+are averaged (except for base population).
+```{r}
+
+# Compute the mean CPM of sub-replicates within each replicate (except Base):
+rep_aggragated_mean_log2CPM <- log2cpm_all_genes_group[, 1:9]
+
+# Calculate the mean of each replicate:
+rep_aggragated_mean_log2CPM$CGE2_1_rep_31 <- apply(log2cpm_all_genes_group[, 10:12], 1, mean)
+rep_aggragated_mean_log2CPM$CGE2_1_rep_32 <- apply(log2cpm_all_genes_group[, 13:15], 1, mean)
+rep_aggragated_mean_log2CPM$CGE2_1_rep_33 <- apply(log2cpm_all_genes_group[, 16:18], 1, mean)
+rep_aggragated_mean_log2CPM$CGE2_1_rep_34 <- apply(log2cpm_all_genes_group[, 19:21], 1, mean)
+rep_aggragated_mean_log2CPM$CGE2_1_rep_35 <- apply(log2cpm_all_genes_group[, 22:24], 1, mean)
+rep_aggragated_mean_log2CPM$CGE2_1_rep_36 <- apply(log2cpm_all_genes_group[, 25:27], 1, mean)
+rep_aggragated_mean_log2CPM$CGE3_1_rep_31 <- apply(log2cpm_all_genes_group[, 28:30], 1, mean)
+rep_aggragated_mean_log2CPM$CGE3_1_rep_32 <- apply(log2cpm_all_genes_group[, 31:33], 1, mean)
+rep_aggragated_mean_log2CPM$CGE3_1_rep_33 <- apply(log2cpm_all_genes_group[, 34:36], 1, mean)
+rep_aggragated_mean_log2CPM$CGE3_1_rep_34 <- apply(log2cpm_all_genes_group[, 37:39], 1, mean)
+rep_aggragated_mean_log2CPM$CGE3_1_rep_35 <- apply(log2cpm_all_genes_group[, 40:42], 1, mean)
+rep_aggragated_mean_log2CPM$CGE3_1_rep_36 <- apply(log2cpm_all_genes_group[, 43:45], 1, mean)
+
+# Make long format:
+log2CPM_sample_group_long <- pivot_longer(cols = -c("gene_id","group", "direction", "full_group"), 
+                                           data = rep_aggragated_mean_log2CPM, 
+                                           names_to = "sample", 
+                                           values_to = "log2CPM")
+
+# Include generation:
+log2CPM_sample_group_long <- log2CPM_sample_group_long %>% 
+  mutate(generation = case_when(grepl("CGE1", sample) ~ "gen0",
+                           grepl("CGE2", sample) ~ "gen07",
+                           grepl("CGE3", sample) ~ "gen31"))
+
+# Create generation_genID column:
+log2CPM_sample_group_long$generation_genID <- paste(log2CPM_sample_group_long$generation,
+                                                log2CPM_sample_group_long$gene_id,
+                                                sep ="_")
+
+# Keep needed columns:
+gene_expression_df <- log2CPM_sample_group_long %>% 
+  dplyr::select(c("group", "direction", "full_group", "generation", "sample",
+                  "gene_id", "generation_genID", "log2CPM"))
+
+# Convert it into data-frame:
+gene_expression_df <- as.data.frame(gene_expression_df)
+
+# Format variables:
+gene_expression_df$generation <- as.factor(gene_expression_df$generation)
+gene_expression_df$group <- as.factor(gene_expression_df$group)
+gene_expression_df$direction <- as.factor(gene_expression_df$direction)
+gene_expression_df$full_group <- as.factor(gene_expression_df$full_group)
+gene_expression_df$log2CPM <- as.numeric(gene_expression_df$log2CPM)
+
+```
+## Computer variance per gene:
+```{r}
+variance_per_gene <- gene_expression_df %>%
+  dplyr::filter(!group %in% c("transitory_F7_F31"))%>%
+  group_by(generation_genID) %>%
+  summarize(variance_log2CPM = var(log2CPM),
+            .groups = 'drop')
+
+# Include grouping variables:
+variance_per_gene_df <- gene_expression_df %>% 
+  dplyr::filter(!group %in% c("transitory_F7_F31")) %>%
+  left_join(variance_per_gene, by = c("generation_genID"))
+
+variance_per_gene_df$group <- factor(variance_per_gene_df$group,
+                           levels = c("plateau",
+                                      "monotonic",
+                                      "late_response",
+                                      "incomplete_reversed",
+                                      "complete_reversed"))
+
+# Calculate median/mean and confidence intervals:
+summary_data <- variance_per_gene_df %>%
+  group_by(generation,
+           direction,
+           group,
+           full_group) %>%
+  summarise(
+    median_log2CPM_variance = median(variance_log2CPM),
+    mean_log2CPM_variance = mean(variance_log2CPM),
+    ci_lower = quantile(variance_log2CPM, 0.025),
+    ci_upper = quantile(variance_log2CPM, 0.975),
+    .groups = 'drop')
+
+summary_data
+
+# Calculate median/mean and confidence intervals:
+summary_data_2 <- variance_per_gene_df %>%
+  group_by(generation,
+           group) %>%
+  summarise(
+    median_log2CPM_variance = median(variance_log2CPM),
+    mean_log2CPM_variance = mean(variance_log2CPM),
+    ci_lower = quantile(variance_log2CPM, 0.025),
+    ci_upper = quantile(variance_log2CPM, 0.975),
+    .groups = 'drop')
+
+# Remove non-significant genes:
+summary_data_2 <- summary_data_2 %>% drop_na(group)
+
+```
+# Export Variance per gene dataset:
+```{r}
+export_df <- variance_per_gene_df %>% droplevels()
+#write_csv(export_df, "output_files/variance_per_gene.csv")
+
+```
+## Lineplots: - medians across genes
+Before, we computed variance for each gene. Here we plot the medians of variances 
+of each transcriptomic group.
+```{r}
+
+plot_df <- summary_data %>% dplyr::filter(full_group != "non_significant_none")
+
+plot_df %>%
+  ggplot(aes(x = generation,
+             y = median_log2CPM_variance,
+             color = group)) +
+  geom_point(shape=1, size=2) + 
+  geom_line(aes(group = group), 
+            alpha = 1, linewidth =1) +  
+  ylab(bquote(Median~of~gene~xpression~(log[2]*CPM)~variance)) +
+  xlab("Generation") +
+  scale_color_manual(values =  c(color_plateau,
+                                color_monotonic,
+                                color_late_response,
+                               color_incomplete_reversed,
+                               color_complete_reversed),
+                     labels = c("Plateau",
+                                "Monotonic",
+                                "Late-response",
+                               "Incomplete-reverse",
+                               "Complete-reverse")) +
+  theme_classic() +
+  facet_wrap(~ direction, nrow=1, labeller = labeller(direction = 
+    c("down" = "down-regulated",
+      "up" = "up-regulated"))) +
+  theme(
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_text(size = 14),
+    axis.text.x = element_text(size = 14, color = "black"),
+    axis.text.y = element_text(size = 14, color = "black"),
+    strip.text = element_text(size = 14),
+    axis.line = element_line(color='black'),
+    plot.background = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    legend.position="bottom",
+    legend.title = element_blank(),
+    legend.text = element_text(size = 14),
+    strip.background=element_rect(colour="black",
+                                    fill="white")) +
+  scale_x_discrete(labels = c("0", "7", "31"))
+
+
+
+##
+
+plot_df <- summary_data_2 %>% dplyr::filter(group != "non_significant_none")
+
+plot_df %>%
+  ggplot(aes(x = generation,
+             y = median_log2CPM_variance,
+             color = group)) +
+  geom_point(shape=1, size=2) + 
+  geom_line(aes(group = group), 
+            alpha = 1, linewidth =1) +  
+  ylab(bquote(Median~of~gene~xpression~(log[2]*CPM)~variance)) +
+  xlab("Generation") +
+  scale_color_manual(values =  c(color_plateau,
+                                color_monotonic,
+                                color_late_response,
+                               color_incomplete_reversed,
+                               color_complete_reversed),
+                     labels = c("Plateau",
+                                "Monotonic",
+                                "Late-response",
+                               "Incomplete-reverse",
+                               "Complete-reverse")) +
+  theme_classic() +
+
+  theme(
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_text(size = 14),
+    axis.text.x = element_text(size = 14, color = "black"),
+    axis.text.y = element_text(size = 14, color = "black"),
+    strip.text = element_text(size = 14),
+    axis.line = element_line(color='black'),
+    plot.background = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    legend.position="bottom",
+    legend.title = element_blank(),
+    legend.text = element_text(size = 14),
+    strip.background=element_rect(colour="black",
+                                    fill="white")) +
+  scale_x_discrete(labels = c("0", "7", "31"))
+
+```
+## Lineplots: - means across genes
+Before, we computed variance for each gene. Here we plot the medians of variances 
+of each transcriptomic group.
+```{r}
+
+plot_df <- summary_data %>% dplyr::filter(full_group != "non_significant_none")
+
+plot_df %>%
+  ggplot(aes(x = generation,
+             y = mean_log2CPM_variance,
+             color = group)) +
+  geom_point(shape=1, size=2) + 
+  geom_line(aes(group = group), 
+            alpha = 1, linewidth =1) +  
+  ylab(bquote(Mean~of~gene~xpression~(log[2]*CPM)~variance)) +
+  xlab("Generation") +
+  scale_color_manual(values =  c(color_plateau,
+                                color_monotonic,
+                                color_late_response,
+                               color_incomplete_reversed,
+                               color_complete_reversed),
+                     labels = c("Plateau",
+                                "Monotonic",
+                                "Late-response",
+                               "Incomplete-reverse",
+                               "Complete-reverse")) +
+  theme_classic() +
+  facet_wrap(~ direction, nrow=1, labeller = labeller(direction = 
+    c("down" = "down-regulated",
+      "up" = "up-regulated"))) +
+  theme(
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_text(size = 14),
+    axis.text.x = element_text(size = 14, color = "black"),
+    axis.text.y = element_text(size = 14, color = "black"),
+    strip.text = element_text(size = 14),
+    axis.line = element_line(color='black'),
+    plot.background = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    legend.position="bottom",
+    legend.title = element_blank(),
+    legend.text = element_text(size = 14),
+    strip.background=element_rect(colour="black",
+                                    fill="white")) +
+  scale_x_discrete(labels = c("0", "7", "31"))
+
+
+#ggplot2::ggsave( "output_files/plots/median_var_gene_plot.svg", last_plot())
+
+```
+## Boxplots - variance all genes per generation
+```{r}
+### DEGs:
+plot_df <- variance_per_gene_df 
+plot_df <- plot_df %>% mutate(group = case_when(is.na(group) == TRUE ~ "non_significant", TRUE ~ group))
+
+plot_df <- plot_df %>% dplyr::filter(group != "non_significant") %>% droplevels()
+
+ggplot(plot_df, aes(x = generation,
+             y = variance_log2CPM)) +
+  geom_boxplot() +
+  theme_classic() + 
+    xlab("Generation") +
+  scale_x_discrete(labels = c("0" ,"7", "31")) +
+theme(
+    axis.title.x = element_text(size = 16),
+    axis.title.y = element_text(size = 16),
+    axis.text.x = element_text(size = 16, color = "black"),
+    axis.text.y = element_text(size = 16, color = "black"),
+    axis.line = element_line(color='black'),
+    plot.background = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    legend.position="bottom",
+    legend.title = element_text(size = 14),
+    legend.text = element_text(size = 14),
+    strip.background=element_rect(colour="black",
+                                    fill="white")) +
+  coord_cartesian(ylim = c(0,0.05))
+
+```
+```{r}
+### Non DEGs:
+plot_df <- variance_per_gene_df %>% mutate(group = case_when(is.na(group) == TRUE ~ "non_significant", TRUE ~ group))
+plot_df <- plot_df %>% dplyr::filter(group == "non_significant") %>% droplevels()
+  
+ggplot(plot_df, aes(x = generation,
+             y = variance_log2CPM)) +
+  geom_boxplot() +
+  theme_classic() + 
+    xlab("Generation") +
+  scale_x_discrete(labels = c("0" ,"7", "31")) +
+theme(
+    axis.title.x = element_text(size = 16),
+    axis.title.y = element_text(size = 16),
+    axis.text.x = element_text(size = 16, color = "black"),
+    axis.text.y = element_text(size = 16, color = "black"),
+    axis.line = element_line(color='black'),
+    plot.background = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    legend.position="bottom",
+    legend.title = element_text(size = 14),
+    legend.text = element_text(size = 14),
+    strip.background=element_rect(colour="black",
+                                    fill="white")) + coord_cartesian(ylim = c(0,0.05)) 
+
+
+
+```
+## Boxplots all groups:
+```{r}
+plot_df <- variance_per_gene_df %>%
+  mutate(group = case_when(is.na(group) == TRUE ~ "non_significant", TRUE ~ group))
+
+plot <- ggplot(plot_df, aes(x = generation,
+             y = variance_log2CPM)) +
+  geom_boxplot() +
+  theme_classic() + 
+    xlab("Generation") +
+  scale_x_discrete(labels = c("0" ,"7", "31")) +
+theme(
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_text(size = 14),
+    axis.text.x = element_text(size = 14, color = "black"),
+    axis.text.y = element_text(size = 14, color = "black"),
+    axis.line = element_line(color='black'),
+    plot.background = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    legend.position="bottom",
+    legend.title = element_text(size = 14),
+    legend.text = element_text(size = 14),
+    strip.background=element_rect(colour="black",
+                                    fill="white")) +
+  coord_cartesian(ylim = c(0,0.05)) +
+  facet_wrap(~ group)
+
+## Compare means across groups - exclude non-significant genes
+plot_df <- plot_df %>% dplyr::filter(group != "non_significant") %>% droplevels()
+ggpubr::compare_means(variance_log2CPM ~ generation, plot_df, group.by = "group")
+
+
+```
+## Boxplots - all DEGs non-Plateau genes
+```{r}
+plot_df <- variance_per_gene_df %>%
+  mutate(group = case_when(is.na(group) == TRUE ~ "non_significant", TRUE ~ group))
+plot_df <- plot_df %>% dplyr::filter(!group %in% c("non_significant", "plateau")) %>% droplevels()
+ 
+# Relevel group:
+plot_df$group <- factor(plot_df$group, levels = c("complete_reversed",
+                                                  "incomplete_reversed",
+                                                  "late_response",
+                                                  "monotonic"))
+
+plot_df <- plot_df %>% mutate(group2 = case_when(group %in% c("complete_reversed", "incomplete_reversed") ~ "A",
+                                                 group %in% c("late_response", "monotonic") ~ "B"))
+
+plot_df %>% ggplot(aes(y = variance_log2CPM, x = generation, color = group)) +
+  geom_boxplot(linewidth=0.6) +  
+  scale_color_manual(values = c(color_complete_reversed,
+                                color_incomplete_reversed,
+                                color_late_response,
+                                color_monotonic),
+                     labels = c("Complete-reverse",
+                                "Incomplete-reverse",
+                                "Late-response",
+                                "Monotonic")) +  
+  theme_classic() +
+  ylab(bquote(Gene~expression~(log[2]*CPM)~variance)) + 
+  xlab("Generation") +
+  theme(legend.position = "bottom")  +
+  coord_cartesian(ylim = c(0, 0.3)) +
+  scale_x_discrete(labels = c("0" ,"7", "31")) +
+theme(
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_text(size = 14),
+    axis.text.x = element_text(size = 14, color = "black"),
+    axis.text.y = element_text(size = 14, color = "black"),
+    axis.line = element_line(color='black'),
+    plot.background = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    legend.position="bottom",
+    legend.title = element_blank(),
+    legend.text = element_text(size = 14),
+    strip.background=element_rect(colour="black",fill="white"),
+    axis.text.x.top  = element_blank(),
+    axis.ticks.x.top = element_blank(),
+    axis.line.x.top = element_blank()) +
+   facet_wrap(~ group2 + direction, ncol=4, strip.position="top") + scale_y_break(c(0.05,0.27), scales = c(0.2,2)) 
+
+# Export plot:
+#ggsave("output_files/plots/correlation_plots_and_trajectories/gene_variance_groups.svg",
+       #width = 300,
+       #height = 200,
+       #units = "mm",
+       #dpi = 300, last_plot())
+
+```
+# Wilkoxon test distribution of gene variances (up and down) - 4 groups 
+Here we compare the variance of some groups within generation.
+I perform different tests for up-regulated and down-regulated genes.
+We are only interested in:
+complete-reverse vs incomplete-reverse, late-response and monotonic.
+```{r}
+
+# generation:
+generation <- c("gen07", "gen31")
+# logFC direction:
+direction <- c("up", "down")
+
+# data_filter_df: keep needed groups
+data_filter_A_df <- variance_per_gene_df %>%
+  dplyr::filter(group %in% c("complete_reversed",
+                             "incomplete_reversed")) 
+
+# Create an empty data frame to store results
+wilcoxon_results_A <- data.frame(
+  generation = character(),
+  #direction = character(),
+  group1 = character(),
+  group2 = character(),
+  p_value = numeric(),
+  stringsAsFactors = FALSE)
+
+for (gen in unique(data_filter_A_df$generation)) {
+  for (direc in unique(data_filter_A_df$direction)) {
+    
+    # Subset the data for the current generation and direction
+    subset_data <- data_filter_A_df %>%
+      filter(generation == gen, direction == direc)
+    
+    # Get the unique full_groups for pairwise comparison
+    full_groups <- unique(subset_data$full_group)
+    
+    # Loop over all pairs of full_groups
+    for (i in 1:(length(full_groups) - 1)) {
+      for (j in (i + 1):length(full_groups)) {
+        
+        group1 <- full_groups[i] 
+        group2 <- full_groups[j] 
+        
+        # Subset the data for the two groups
+        group1_data <- subset_data[subset_data$full_group == group1, "variance_log2CPM"] 
+        group2_data <- subset_data[subset_data$full_group == group2, "variance_log2CPM"]
+        
+        # Perform Wilcoxon test
+        test_result <- wilcox.test(group1_data, group2_data)
+        
+        # Store the results in the data frame
+        wilcoxon_results_A <- rbind(wilcoxon_results_A,
+          data.frame(test = "Wilcoxson rank sum test, two tailed",
+          generation = gen,
+          logFC_direction = direc,
+          group1 = group1,
+          group2 = group2,
+          p_value = test_result$p.value))
+      }
+    }
+  }
+}
+
+###
+
+# Create an empty data frame to store results
+wilcoxon_results_B <- data.frame(
+  generation = character(),
+  #direction = character(),
+  group1 = character(),
+  group2 = character(),
+  p_value = numeric(),
+  stringsAsFactors = FALSE)
+
+
+data_filter_B_df <- variance_per_gene_df %>%
+  dplyr::filter(group %in% c("monotonic", "late_response")) %>% droplevels()
+
+for (gen in unique(data_filter_B_df$generation)) {
+  for (direc in unique(data_filter_B_df$direction)) {
+    
+    # Subset the data for the current generation and direction
+    subset_data <- data_filter_B_df %>%
+      filter(generation == gen, direction == direc)
+    
+    # Get the unique full_groups for pairwise comparison
+    full_groups <- unique(subset_data$full_group)
+    
+    # Loop over all pairs of full_groups
+    for (i in 1:(length(full_groups) - 1)) {
+      for (j in (i + 1):length(full_groups)) {
+        
+        group1 <- full_groups[i] 
+        group2 <- full_groups[j] 
+        
+        # Subset the data for the two groups
+        group1_data <- subset_data[subset_data$full_group == group1, "variance_log2CPM"] 
+        group2_data <- subset_data[subset_data$full_group == group2, "variance_log2CPM"]
+        
+        # Perform Wilcoxon test
+        test_result <- wilcox.test(group1_data, group2_data)
+        
+        # Store the results in the data frame
+        wilcoxon_results_B <- rbind(wilcoxon_results_B,
+          data.frame(test = "Wilcoxson rank sum test, two tailed",
+          generation = gen,
+          logFC_direction = direc,
+          group1 = group1,
+          group2 = group2,
+          p_value = test_result$p.value))
+      }
+    }
+  }
+}
+
+# Combine results:
+wilcoxon_results <- rbind(wilcoxon_results_A, wilcoxon_results_B)
+
+# Adjust p-values across all tests:
+wilcoxon_results <- wilcoxon_results %>%
+  #group_by(generation, logFC_direction) %>% 
+  mutate(padj_fdr = p.adjust(p_value, method = "fdr"))
+
+# Include asterisks:
+wilcoxon_results <- wilcoxon_results %>%
+  mutate(significance = case_when(
+    padj_fdr >= 0.05 ~ "n.s",          
+    padj_fdr <= 0.05 & padj_fdr > 0.01 ~ "*",  
+    padj_fdr <= 0.01 & padj_fdr >= 0.001 ~ "**", 
+    padj_fdr < 0.001 ~ "***",
+    padj_fdr <= 0.0001 ~ "****"))
+
+# Export results:
+export_df <- wilcoxon_results
+#write_xlsx(export_df, "/output_files/S3_gene_variance_across_groups_tests.xlsx")
+
+```
+
+--- END ---

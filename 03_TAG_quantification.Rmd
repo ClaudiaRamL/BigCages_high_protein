@@ -1,0 +1,383 @@
+---
+title: "High-Protein BigCages - TAG content quantifications from absorbance"
+Author: "Claudia Ramirez-Lanzas"
+Date: "4/11/2024"
+---
+
+Here we compute TAG concentrations using the raw measurements of the
+colorimetric assays (absorbance).
+Standard curves based on inverse regression polynomial curve for TAG 
+samples are used to compute concentration. 
+
+# Load libraries:
+```{r}
+# Data handling:
+library("readxl")
+library("writexl")
+library("xlsx")
+library("tidyverse")
+
+# Calculations:
+library("reshape2")
+
+
+# Plotting:
+library("patchwork")
+library("ggplot2")
+library("ggpubr") 
+
+
+```
+# Imput files:
+```{r}
+# Load data-set with  standards for TAG.
+Big_standards <- read_csv("input_files/BigCages_TAG_540nm_standards.csv", show_col_types = FALSE)
+
+# Import data-set with samples absorbances:
+Big_absorbances <- read_csv("input_files/BigCages_TAG_540nm_absorbances.csv", show_col_types = FALSE)
+
+```
+* Big_standards: The data-set contains absorbances at 540nm for the standards
+where concentration are known. The measurements were corrected by the sample background ABS.
+* Big_absorbances: The data-set contains absorbance at 540nm for the samples.
+The measurements were corrected by the sample background ABS.
+
+# Function 1:
+Create a data-frame with 2nd order polynomial models fitted by quantification batch.
+We fit inverse polynomial regression as suggested in
+(Delgado R. 2022 Misuse of Beer–Lambert Law and other calibration curves.
+R. Soc. Open Sci. 9: 211103. https://doi.org/10.1098/rsos.211103)
+```{r}
+models_func <- function(x){
+  list_batches = split(x, list(x$batch,x$metabolite))
+  result <- NULL
+  idx <- 0
+  for (i in list_batches){
+    idx <- idx + 1
+    batch_name <- names(list_batches)[idx]
+  
+    lm2 = lm(ug_ml_expected ~ poly(ABS, 2, raw = TRUE), data = i)
+    coeff2 <- round(lm2$coefficients , 7)
+    i$lm2_intercept = coeff2[1]
+    i$lm2_slope = coeff2[2]
+    i$lm2_x2term = coeff2[3]
+    i$lm2_std_res = rstandard(lm2)
+    i$lm2_R2_adjusted = round(summary(lm2)$adj.r.squared,3)
+
+    plot_result = plotting_func(i, batch_name)
+    
+    if (is.null(result)) {
+      result <- i
+    } else {
+      result <- full_join(result, i)
+    }
+  }
+  
+  result
+}
+
+```
+# Function 2:
+Plot standards curves with fitting models equations:
+```{r}
+
+plotting_func <- function(x, plot_name="default"){
+  p <- plot(x$ABS,x$ug_ml_expected, main=plot_name)
+  lm1 = lm(ug_ml_expected ~ ABS, data = x) # Inverse regression, concentration as a function of known absorbance. 
+  lm2 = lm(ug_ml_expected ~ poly(ABS, 2, raw = TRUE), data = x)
+
+  # Plot the predicted lines:
+  #p <- p + abline(lm1, col = "green") # 1st degree
+  lm2sample <- seq(0,3, length=50)
+  p <- p + lines(lm2sample, predict(lm2, data.frame(ABS=lm2sample)), col="red") #2nd degree
+  # Get model coefficients:
+  coeff1 <- round(lm1$coefficients , 7)
+  coeff2 <- round(lm2$coefficients , 7)
+  # Plot the ecuations:
+  #p <- p + text(0.3, 1500 , paste("lm1: ", coeff1[1], " + ", coeff1[2],
+  #                              "*x", "R2 adjusted: ", round(summary(lm1)$adj.r.squared, 3) ), cex=0.7, col="green")
+  p <- p + text(0.05, 20 , paste("lm2: ", coeff2[1], " + ", coeff2[2],
+                                 "*x", "+", coeff2[3], "*x^2", "R2 adjusted: ",
+                                 round(summary(lm2)$adj.r.squared, 3) ), cex=0.7, col="red")
+  
+  return(p)
+}
+
+```
+# Function 3:
+Computes the coefficient of variation between 2 samples
+NOTE: standard deviation is computed for 2 degrees of freedom 
+```{r}
+
+my_CV_2df <- function(v1, v2){
+  m = mean(c(v1,v2))
+  summa_diff_squared = (abs(v1-m) + abs(v2-m))**2
+  sq_sdif = sqrt(summa_diff_squared)
+  my_sd = sq_sdif/2
+  my_cv = (my_sd/m)*100
+  return(my_cv)
+}
+
+```
+
+# ####Part 1: create standard curves for each quantification batch
+# Compute average absorbance:
+```{r}
+Big_standards$average_ABS <- (Big_standards$ABS1 + Big_standards$ABS2)/2
+
+# Set variables types:
+cols_factor <- c( "standard_group","metabolite","batch","point")
+cols_numeric <- c("ug_ml_expected", "ABS1","ABS2", "average_ABS")
+Big_standards[cols_factor] <- lapply(Big_standards[cols_factor], as.factor)
+Big_standards[cols_numeric] <- lapply(Big_standards[cols_numeric], as.numeric)
+
+str(Big_standards)
+# Convert data-set into long format:
+Big_standards <- pivot_longer(Big_standards, cols = c("ABS1","ABS2"),
+                            names_to = "tech_rep", values_to = "ABS")
+Big_standards$ABS <- as.numeric(Big_standards$ABS)
+Big_standards$tech_rep <- as.factor(Big_standards$tech_rep)
+
+
+Big_standards
+
+```
+# Run models_func to fit regression models:
+```{r}
+dataset_TAG_residuals <- models_func(Big_standards)
+
+```
+# Filter outlier standardized residuals and run the standard curves again:
+In order to automate the optimization of standard curves we remove the
+outlier standardized residuals of each standard curve.
+
+Note: A standardized residual is the raw residual divided by an estimate 
+of the standard deviation of the residuals. 
+There is a general consensus in literature that standardized residuals (absolute value) 
+larger than 2 can be outliers.
+
+```{r}
+# Use polynomial model. 
+
+dataset_TAG_residuals_filter_lm2 <- dataset_TAG_residuals %>% filter(abs(lm2_std_res) < 2)  
+bc <- nrow(dataset_TAG_residuals) - nrow(dataset_TAG_residuals_filter_lm2) # 3 residuals removed
+
+print("residuals removed:")
+bc
+
+```
+# Run models_func to fit models AFTER FILTERING:
+```{r}
+dataset_TAG_residuals_filter_lm2_refit <- models_func(dataset_TAG_residuals_filter_lm2) 
+
+```
+# Visualize model coefficients in a table:
+```{r}
+# Remove all duplicated rows:
+TAG_dataset_models <- distinct(dataset_TAG_residuals_filter_lm2_refit, standard_group, 
+                               metabolite, batch, 
+                               .keep_all= TRUE)
+
+TAG_dataset_models
+
+```
+# ####Part 2:  Compute concentration (ug/ml) from absorbances:
+# Format variables:
+```{r}
+# Set variables types:
+cols_factor <- c( "rep", "subrep",
+                  "treatment","unique_id",
+                  "id_quantification", "sample",
+                  "tech_rep", "sex", "standard_group", "Who")
+
+cols_numeric <- c("nb_flies", "total_g",
+                  "total_mg", "dilution_factor",
+                  "ABS", "hom_vol_ml")
+
+Big_absorbances[cols_factor] <- lapply(Big_absorbances[cols_factor], as.factor)
+Big_absorbances[cols_numeric] <- lapply(Big_absorbances[cols_numeric], as.numeric)
+
+
+(str(Big_absorbances))
+
+```
+
+# Compute concentrations:
+```{r}
+# First: merge dataset_TAG with TAG_dataset_models so each sample (row) 
+#contains also columns for the coefficient of the metabolite-batch specific models:
+
+merge_1 <- Big_absorbances
+merge_2 <- TAG_dataset_models %>% select(-c(metabolite, batch, point, ug_ml_expected, average_ABS, tech_rep, ABS, Who))
+
+merged_dataset_samples_and_models <- inner_join(merge_1, merge_2, by="standard_group")
+merged_dataset_samples_and_models <- merged_dataset_samples_and_models %>% relocate(ABS, .after = lm2_R2_adjusted)
+
+# Second: compute homogenate concentration (ug_ml) in a new column by using next formula:
+# (concentration = (absorbance x slope) + intercept):
+merged_dataset_samples_and_models <- merged_dataset_samples_and_models %>%  
+  rowwise() %>% 
+  mutate(conc_ug_ml = (lm2_intercept + ABS*lm2_slope + lm2_x2term*(ABS)^2)) # Using polynomial curve. 
+
+merged_dataset_samples_and_models$conc_ug_ml <- as.numeric(merged_dataset_samples_and_models$conc_ug_ml)
+
+```
+
+# Compute CV% (coefficient of variance): - tech reps
+For each pair of technical replicates we compute the coefficient of variance in order to 
+filter samples above a threshold.
+```{r}
+# First spread tech_rep_nb column in 4 columns so CV can be computed row-wise: 
+
+short_df <- merged_dataset_samples_and_models %>% dplyr::select("unique_id",
+                                                                "sample", "rep", "subrep",
+                                                                "treatment","nb_flies", "hom_vol_ml",
+                                                                "sex", "total_g", "total_mg",
+                                                 "dilution_factor",
+                                                 "standard_group",
+                                                 "tech_rep",
+                                                 "conc_ug_ml",
+                                                 "Who")
+
+short_wide_df <- as.data.frame(short_df) %>% dcast(sample +  
+                                                     treatment + sex +
+                                                     nb_flies +
+                                                     hom_vol_ml +
+                                                     total_g +
+                                                     total_mg + 
+                                                     dilution_factor ~ tech_rep, value.var = "conc_ug_ml")
+
+
+# Format variables:
+cols_numeric <- c("tech_rep_1", "tech_rep_2", "tech_rep_3", "tech_rep_4")
+short_wide_df[cols_numeric] <- lapply(short_wide_df[cols_numeric], as.numeric)
+
+#Compute CV%
+short_wide_df <- short_wide_df %>% as_tibble() %>% rowwise() %>% 
+  mutate(CV_concentration_1and2 = my_CV_2df(tech_rep_1, tech_rep_2),
+         CV_concentration_3and4 = my_CV_2df(tech_rep_3, tech_rep_4),
+         CV_concentration_1and3 = my_CV_2df(tech_rep_1, tech_rep_3),
+         CV_concentration_1and4 = my_CV_2df(tech_rep_1, tech_rep_4),
+        CV_concentration_2and3 = my_CV_2df(tech_rep_2, tech_rep_3),
+         CV_concentration_2and4 = my_CV_2df(tech_rep_2, tech_rep_4))
+
+```
+# Check repeated samples:
+Some samples were repeated and have several measurements. Keep those pairs with lowest CV.
+```{r}
+
+# prepare data-set:
+short_df$full_unique_id <- paste(short_df$unique_id, short_df$tech_rep, sep ="_")
+
+# Manually identify good samples:
+# CGE2_2_36_2_male tech reps 2 & 3
+# CGE1_B_8_male 3 4
+# CGE1_B_7_female 3 4
+
+
+# Samples to be removed: 
+sample_list <- c("tag_batch_1_CGE2_2_36_2_male_tech_rep_1",
+                 "tag_batch_1_CGE1_B_8_male_tech_rep_1",
+                 "tag_batch_1_CGE1_B_8_male_tech_rep_2",
+                 "tag_batch_1_CGE1_B_7_female_tech_rep_1",
+                 "tag_batch_1_CGE1_B_7_female_tech_rep_2")
+
+# Remove samples:
+short_filter_df <- subset(short_df, !(full_unique_id %in% sample_list))
+ 
+```
+# Recompute CV:
+```{r}
+
+short_wide_df_2 <- as.data.frame(short_filter_df) %>% dcast(sample + rep +
+                                                              subrep +
+                                                              treatment + sex +
+                                                              nb_flies + hom_vol_ml +
+                                                              total_g + total_mg +
+                                                              dilution_factor +
+                                                              Who  ~ tech_rep,
+                                                            value.var = "conc_ug_ml")
+
+short_wide_df_2 <- short_wide_df_2 %>%
+  mutate(
+    tech_rep_1 = coalesce(tech_rep_1, tech_rep_3, tech_rep_4, tech_rep_2),
+    tech_rep_2 = coalesce(tech_rep_2, tech_rep_4, tech_rep_3, tech_rep_1)) 
+
+cols_numeric <- c("tech_rep_1", "tech_rep_2")
+short_wide_df_2[cols_numeric] <- lapply(short_wide_df_2[cols_numeric], as.numeric)
+
+
+#### CV%
+short_wide_df_2 <- short_wide_df_2 %>% as_tibble() %>% rowwise() %>% 
+  mutate(CV_concentration_1and2 = my_CV_2df(tech_rep_1, tech_rep_2))
+
+short_wide_df_2 <- short_wide_df_2 %>% select("sample", "rep", "subrep", "treatment",
+                                              "sex", "Who","nb_flies",
+                                              "hom_vol_ml", "total_g",
+                                              "total_mg", "dilution_factor",
+                                              "tech_rep_1", "tech_rep_2",
+                                              "CV_concentration_1and2" )
+
+short_wide_df_2 <- short_wide_df_2 %>% as_tibble() %>% rowwise() %>% 
+  mutate(mean_conc_ug_ml = mean(c(tech_rep_1, tech_rep_2)))
+
+```
+# Histogram of CV:
+```{r}
+hist(short_wide_df_2$CV_concentration_1and2)
+```
+# Compute final concentrations: 
+```{r}
+short_wide_df_2 <- short_wide_df_2 %>% as_tibble() %>% rowwise() %>% 
+  mutate(ug_TAG_homogenate = mean_conc_ug_ml* hom_vol_ml)
+
+short_wide_df_2 <- short_wide_df_2 %>% as_tibble() %>% rowwise() %>% 
+  mutate(ug_TAG_fly = ug_TAG_homogenate/nb_flies)
+
+short_wide_df_2 <- short_wide_df_2 %>% as_tibble() %>% rowwise() %>% 
+  mutate(ug_TAG_mg_fly= ug_TAG_homogenate/total_mg)
+
+```
+# Include variables:
+```{r}
+# Include CGE:
+final_dataset <- short_wide_df_2 %>% 
+     mutate(CGE = case_when(
+       grepl("CGE1_", sample) ~ "CGE1",
+       grepl("CGE2_1_", sample) ~"CGE2_1",
+       grepl("CGE2_2_", sample) ~"CGE2_2",
+       grepl("CGE3_1_", sample) ~"CGE3_1",
+       grepl("CGE3_2_", sample) ~"CGE3_2"))
+
+final_dataset <- final_dataset %>% dplyr::relocate(CGE, .after = sample)
+final_dataset$CGE <- as.factor(final_dataset$CGE )
+
+# Include generation:
+final_dataset <- final_dataset %>% 
+     mutate(generation = case_when(
+       grepl("CGE1_", sample) ~ "gen0",
+       grepl("CGE2_1_", sample) ~ "gen7",
+       grepl("CGE2_2_", sample) ~ "gen7",
+       grepl("CGE3_1_", sample) ~ "gen31",
+       grepl("CGE3_2_", sample) ~ "gen31"))
+
+final_dataset <- final_dataset %>% dplyr::relocate(generation, .after = CGE)
+final_dataset$generation <- as.factor(final_dataset$generation )
+
+```
+
+# Remove samples with CV >= 10%
+```{r}
+final_dataset <- final_dataset %>% dplyr::filter(CV_concentration_1and2 < 10)
+  
+hist(final_dataset$CV_concentration_1and2)
+
+```
+# Export dataset:
+```{r}
+export_dataset <- final_dataset 
+#write_csv(export_dataset, "/Users/cramirez/Desktop/github_repositories/BigCages_high_protein/input_files/BigCagesTAG_concentrations.csv")
+
+```
+
+--- END ---

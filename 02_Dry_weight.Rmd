@@ -1,0 +1,885 @@
+---
+title: "High-Protein BigCages - Dry-weight"
+Author: "Claudia Ramirez-Lanzas"
+Date: "11/06/2024"
+---
+
+# Load libraries:
+```{r}
+# Data handling:
+library("readxl")
+library("writexl")
+library("xlsx")
+library("tidyverse")
+
+# Statistics:
+library("lme4")
+library("lmerTest") # to include approximate p-values in the output of lmer. 
+library("emmeans")
+library("car")
+library("HLMdiag")
+library("ggeffects")
+
+# Plotting:
+library("patchwork")
+library("ggplot2")
+library("ggpubr") 
+
+```
+
+```{r}
+sessionInfo()
+```
+# Part 1: Prepare the data-set and plot raw data
+# Import data-set:
+```{r}
+dry_weight_Big <- read_csv("input_files/BigCages_dry_weight.csv", show_col_types = FALSE) 
+
+```
+# Designate variables as a categorical and numerical factors:
+```{r}
+# Format the variables:
+cols_factor <- c("CGE","generation", "rep", "subrep", 
+                 "subsubrep", "treatment")
+
+cols_numeric <- c("nb_females", "nb_males", "total_flies",
+                  "females_mg", "females_g", "males_mg", "males_g")
+dry_weight_Big[cols_factor] <- lapply(dry_weight_Big[cols_factor], as.factor)
+dry_weight_Big[cols_numeric] <- lapply(dry_weight_Big[cols_numeric], as.numeric)
+
+# re-order factor levels for treatment:
+dry_weight_Big$treatment <- factor(dry_weight_Big$treatment, 
+                                   levels=c("base", "trial_big"))
+# re-order factor levels for generation:
+dry_weight_Big$generation <- factor(dry_weight_Big$generation, 
+                                    levels=c("gen0", "gen7", "gen31"))
+
+```
+# Check data-set structure:
+```{r}
+str(dry_weight_Big)
+```
+# Prepare variables:
+Dry weight was measured as the mass of all females and males
+in each replicate used for the fecundity assay. 
+```{r}
+# Keep needed columns:
+dry_weight_Big <- dry_weight_Big %>% dplyr::select(c("CGE","rep","subrep",
+                                                   "subsubrep","generation",
+                                                   "treatment",
+                                                   "nb_females","nb_males",
+                                                   "total_flies", "females_mg",
+                                                   "males_mg"))
+# Homogenize labeling:
+dry_weight_Big$subrep <- sub("^0", "", dry_weight_Big$subrep)
+dry_weight_Big$subsubrep <- sub("^0", "", dry_weight_Big$subsubrep)
+
+
+table(dry_weight_Big$treatment, dry_weight_Big$CGE)
+table(dry_weight_Big$treatment)
+table(dry_weight_Big$generation)
+table(dry_weight_Big$CGE)
+
+```
+# Compute mg per fly:
+```{r}
+
+dry_weight_Big$female <- dry_weight_Big$females_mg / dry_weight_Big$nb_females
+dry_weight_Big$male <- dry_weight_Big$males_mg / dry_weight_Big$nb_males
+
+# Long format:
+dry_weight_Big_long <-  dry_weight_Big %>%
+  tidyr::pivot_longer(cols = c(female, male),
+                      names_to = "sex",
+                      values_to = "mg_fly")
+
+```
+
+# Plot -  dry weight per sex
+```{r}
+# Fecundity normalized by number of females:
+pallete_treatments <- c("orange","#af8dc3","#762a83")
+
+dry_weight_Big_long %>%
+  ggplot(aes(x = generation,
+             y = mg_fly,
+             fill = generation))  +
+  geom_boxplot(outlier.size = 0.0001) + 
+  geom_text(data = dry_weight_Big_long %>% filter(!is.na(mg_fly)), 
+            aes(label = ifelse(mg_fly > quantile(mg_fly, 0.75) + 1.5 * IQR(mg_fly) | 
+                               mg_fly < quantile(mg_fly, 0.25) - 1.5 * IQR(mg_fly), 
+                             as.character(rep), "")),
+            position = position_dodge(width = 0.75), vjust = -0.5) + 
+  scale_fill_manual(values = pallete_treatments) +  
+  ylab("mg dry weight / fly") + 
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 10)) +
+  guides(fill = FALSE) +
+  theme_light() +
+  theme(panel.grid = element_blank(),
+        legend.position = "none",
+        text = element_text(size = 13)) + 
+  xlab("") +
+  facet_wrap(~sex)
+
+plot_df <- dry_weight_Big_long
+
+plot_df %>% ggplot(aes(x = as.numeric(generation), y = mg_fly, color = rep)) +
+  geom_point(size=4, alpha=0.4) + facet_wrap(~ sex)
+  
+```
+# Plot - dry weight per replicate and sex
+```{r}
+# Fecundity normalized by number of females:
+pallete_treatments <- c("orange","#af8dc3","#762a83")
+
+dry_weight_Big_long %>%
+  ggplot(aes(x = rep,
+             y= mg_fly,
+             fill=generation))  +
+geom_boxplot() +
+  scale_fill_manual(values = pallete_treatments) +  
+  ylab("mg dry weight / fly") + 
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 10)) +
+  guides(fill = FALSE) +
+  theme_light() +
+  theme(panel.grid = element_blank(),
+        legend.position = "none",
+        text = element_text(size = 13)) + 
+  xlab("") +
+  facet_wrap(~sex+generation)
+
+
+
+```
+## Remove 2 outliers:
+We have evidences that CGE2_2_35_2 & CGE2_2_35_3 samples should be removed: our
+notebook indicates that many flies escaped at once during the fecundity assay so
+those samples are removed for this analysis and also the fecundity analysis.
+```{r}
+# Create unique ID:
+dry_weight_Big_long$unique_id <- paste(dry_weight_Big_long$CGE, dry_weight_Big_long$rep, dry_weight_Big_long$subrep, sep="_")
+
+# Remove sample CGE2_2_35_3
+dry_weight_Big_filter <- dry_weight_Big_long %>% dplyr::filter(!unique_id %in% c("CGE2_2_35_3", "CGE2_2_35_2"))
+
+```
+
+
+
+# ####Part 2: - overall model 
+Here we test the difference in body weight across generations 0, 7 and 31 for 
+females and males.
+# #Create model dataset:
+
+Here we aggregate the replicate weights using the average of the 3 sub-replicates
+because we were not able to make the residuals homogeneous in previous analysis.
+```{r}
+model_dataset_full <- dry_weight_Big_filter %>% dplyr::select(c( "CGE", "generation",
+                                                        "rep", "subrep",
+                                                        "treatment",
+                                                        "sex", 
+                                                 "mg_fly"))
+  
+  
+# The samples from base population are not averaged:
+base <- model_dataset_full %>% dplyr::filter(CGE == "CGE1")
+
+# The samples from evolved populations are averaged within each replicate:
+evolved <- model_dataset_full %>% dplyr::filter(CGE != "CGE1")
+evolved_aggre <- evolved %>% 
+  group_by(generation, CGE,rep, sex) %>% 
+  summarise(mg_fly = mean(mg_fly))
+
+# Select columns to match with evolved_aggre:
+base <- base %>% dplyr::select(c(colnames(evolved_aggre)))
+
+# Combine base and aggregated evolved replicates:
+model_dataset_aggre <- rbind(base, evolved_aggre)
+
+# Format the variables:
+cols_factor <- c("rep", 
+                 "generation",
+                 "sex")
+
+model_dataset_aggre[cols_factor] <- lapply(model_dataset_aggre[cols_factor], as.factor)
+
+table(model_dataset_aggre$rep, model_dataset_aggre$generation)
+
+
+```
+
+# Fit the model
+```{r}
+model_1 <-  lmer((mg_fly) ~ generation*sex + (1 | rep),
+                 data = model_dataset_aggre,
+                 REML = FALSE)
+summary(model_1)
+
+# Introduce the residuals in the data-set:
+model_dataset_1 <- model_dataset_aggre
+model_dataset_1$residuals <- residuals(model_1)
+model_dataset_1$unique_id <- paste(model_dataset_1$CGE, model_dataset_1$rep, model_dataset_1$sex, sep="_")
+
+```
+# Check model assumptions:
+```{r}
+
+# Homogeneity of variance:
+#Predicted values are plotted against residuals to assess variance homogeneity.
+plot(predict(model_1), residuals(model_1))
+# Levene's test with one independent variable. # Homogeneous variance P-value= 
+leveneTest(residuals ~ generation, data = model_dataset_1)
+
+
+# Normality of residuals:
+# Q-Q plot of normal residuals:
+qqPlot(residuals(model_1))
+
+# Normality test 1:
+shapiro.test(residuals(model_1))
+# Normality test 2:
+ks.test(residuals(model_1),"pnorm", mean(residuals(model_1)), sd(residuals(model_1))) 
+
+# Check assumptions for random intercept term:
+# Are random intercept normally distributed?
+ranef_rep <- ranef(model_1)[[1]]
+ranef_rep$rep <- rownames(ranef_rep)
+ranef_rep <- merge(ranef_rep, model_dataset_1[!duplicated(model_dataset_1$rep), 
+                                              c("generation", "rep")], by = "rep")
+
+qqnorm(ranef_rep$`(Intercept)`, 
+       main="QQ Plot for random intercepts per generation", 
+       col = ranef_rep$generation, pch =19)
+
+
+```
+# Remove 2 outliers and fit the model:
+```{r}
+model_dataset_1 <- model_dataset_1 %>% dplyr::filter(residuals < 0.04) %>% dplyr::filter(residuals > -0.05)
+
+model_1 <-  lmer((mg_fly) ~ generation*sex + (1 | rep), data = model_dataset_1, REML = FALSE)
+summary(model_1)
+
+# Introduce the residuals in the data-set:
+model_dataset_1$residuals <- residuals(model_1)
+model_dataset_1$unique_id <- paste(model_dataset_1$CGE,
+                                   model_dataset_1$rep,
+                                   model_dataset_1$sex,
+                                   sep="_")
+
+```
+# Check model assumptions:
+```{r}
+
+# Homogeneity of variance:
+#Predicted values are plotted against residuals to assess variance homogeneity.
+plot(predict(model_1), residuals(model_1))
+# Levene's test with one independent variable. # Homogeneous variance P-value= 
+leveneTest(residuals ~ generation, data = model_dataset_1)
+
+# Normality of residuals:
+# Q-Q plot of normal residuals:
+qqPlot(residuals(model_1))
+# Normality test 1:
+shapiro.test(residuals(model_1))
+# Normality test 2:
+ks.test(residuals(model_1),"pnorm", mean(residuals(model_1)), sd(residuals(model_1))) 
+
+# Check assumptions for random intercept term:
+# Are random intercept normally distributed?
+ranef_rep <- ranef(model_1)[[1]]
+ranef_rep$rep <- rownames(ranef_rep)
+ranef_rep <- merge(ranef_rep, model_dataset_1[!duplicated(model_dataset_1$rep), 
+                                              c( "generation", "rep")], by = "rep")
+
+qqnorm(ranef_rep$`(Intercept)`, 
+       main="QQ Plot for random intercepts per generation", 
+       col = ranef_rep$generation, pch =19)
+
+
+```
+# Contrasts:
+```{r}
+# Contrasts:
+contrasts <- summary(emmeans(model_1,
+                             pairwise ~ generation|sex, 
+                      type="response",
+                      adjust = "none")$contrasts) 
+contrasts
+
+# Predicted Means:
+predicted_means <- summary(emmeans(model_1, pairwise ~ generation|sex, 
+                      type="response", adjust="none")$emmeans) 
+
+# Change generation scale to reduce distances proportionally: (make nicer plot)
+predicted_means <- predicted_means %>% dplyr::mutate(generation = case_when(generation == "gen0" ~ 0, 
+                                                                            generation == "gen7" ~ 0.5,
+                                                                            generation == "gen31" ~ 1.5))
+
+# Plot:
+plot(emmeans(model_1, pairwise ~ generation|sex, 
+                      type="response", adjust = "none"))
+
+## Make a data-set with results:
+results <- as.data.frame(contrasts)
+results <- results %>%
+  separate(contrast, into = c("group1", "group2"), sep = " - ")
+
+results
+
+```
+# Plot - emmeans
+```{r}
+
+pallete_treatments <- c("#f1a340","#af8dc3", "#762a83")
+
+plot1 <- predicted_means %>% ggplot(
+  aes(x = generation,
+      y = response, fill=as.factor(generation))) + 
+  geom_bar(stat = "identity", 
+           position = position_dodge(width = 0.4),
+           width=0.3) +
+  geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL),
+                position = position_dodge(width = 0.3),
+                width = 0.1) + 
+  scale_fill_manual(values = pallete_treatments) + 
+  facet_wrap(~sex, 
+             labeller = as_labeller(
+               c(female = "Females", male = "Males"))) +
+  labs(title = "",
+       x = "",
+       y = "Dry weight (mg / fly)") +  
+  theme_classic() +
+  xlab("Generation") + 
+  theme(aspect.ratio = 1, plot.margin = margin(0, 0, 0, 0)) + 
+  theme(axis.text.x.top  = element_blank(),
+    axis.title.x = element_text(size = 20),
+    axis.title.y = element_text(size = 20),
+    axis.text.x = element_text(size = 20, color = "black"),
+    axis.text.y = element_text(size = 20, color = "black"),
+    axis.line = element_line(color='black'),
+    plot.background = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    strip.background = element_blank(),
+    axis.title = element_text(size = 16),
+    strip.text = element_text(size = 16, face = "bold"),
+    legend.position="none") +
+  scale_x_continuous(breaks = c(0, 0.5, 1.5),
+                     labels = c(0,7,31))
+
+plot1
+
+# Export plot:
+#ggsave("output_files/plots/High_order_phenotypes/body_weight_overall_emmeans.svg",
+#plot_overall_fec, units = "mm", height = 160, width = 300)
+
+```
+# Final p-values: correction across all contrasts
+The p-value of emmeans was not corrected (p.value)
+```{r}
+
+# Correct for multiple testing across all contrasts and sex:
+results$padj_fdr <- p.adjust(results$p.value, method = "fdr",
+                             n = length(results$p.value))
+results
+
+
+# Export results:
+#write.xlsx(results, file = "output_files/S4_models_high_order_phenotypes.xlsx", sheetName="weight_overall", append=TRUE)
+
+```
+
+# #### Part 3: replicate-wise model
+Here we test the difference in body weight across the 6 different replicates
+at generation 7 and at generation 31 by fitting one model for each generation
+and sex.
+## Create  datasets for F7 and F31:
+```{r}
+
+# Subset data-sets for the 4 models:
+big_F7_females <- dry_weight_Big_filter %>% filter(generation == "gen7" & sex == "female") 
+# Format the variables:
+cols_factor <- c("rep", 
+                 "subrep", 
+                 "subsubrep")
+big_F7_females[cols_factor] <- lapply(big_F7_females[cols_factor], as.factor)
+
+
+##
+big_F7_males <- dry_weight_Big_filter %>% filter(generation == "gen7" & sex == "male") # 
+# Format the variables:
+cols_factor <- c("rep", 
+                 "subrep", 
+                 "subsubrep")
+big_F7_males[cols_factor] <- lapply(big_F7_males[cols_factor], as.factor)
+
+
+##
+big_F31_females <- dry_weight_Big_filter %>% filter(generation == "gen31" & sex == "female") 
+# Format the variables:
+cols_factor <- c("rep", 
+                 "subrep", 
+                 "subsubrep")
+big_F31_females[cols_factor] <- lapply(big_F31_females[cols_factor], as.factor)
+
+##
+big_F31_males <- dry_weight_Big_filter %>% filter(generation == "gen31" & sex == "male") 
+# Format the variables:
+cols_factor <- c("rep", 
+                 "subrep", 
+                 "subsubrep")
+big_F31_males[cols_factor] <- lapply(big_F31_males[cols_factor], as.factor)
+
+```
+# #F7  Females
+# Fit the model 
+```{r}
+#model_1 <- lmer(log10(mg_fly) ~ rep + (1 | rep), data = big_F7_females) # Warning: Model may not have converged with 1 eigenvalue close to zero: 9.2e-10. 
+
+model_1 <- lm(log10(mg_fly) ~ rep, data = big_F7_females) 
+
+summary(model_1)
+
+```
+# Check model assumptions:
+```{r}
+#Create model_1_dataset
+model_1_dataset <- big_F7_females
+## Introduce the residuals in the dataset:
+model_1_dataset$residuals <- residuals(model_1)
+
+# Homogeneity of variance:
+plot(predict(model_1), residuals(model_1))
+# Levene's test with one independent variable. 
+leveneTest(residuals ~ rep, data = model_1_dataset)
+# Q-Q plot of normal residuals
+qqPlot(residuals(model_1))
+
+# Normality test1:
+shapiro.test(residuals(model_1)) 
+
+# Normality test 2:
+#Kolmogorov-Smirnov test
+ks.test(residuals(model_1),"pnorm", mean(residuals(model_1)), sd(residuals(model_1))) 
+
+```
+# Contrasts:
+```{r}
+contrasts <- summary(emmeans(model_1, pairwise ~ rep, 
+                      type="response", adjust = "none")$contrasts)
+
+# Predicted Means:
+predicted_means <- summary(emmeans(model_1, pairwise ~ rep, 
+                      type="response")$emmeans) 
+
+## Make a data-set with results:
+results <- as.data.frame(contrasts)
+results <- results %>%
+  separate(contrast, into = c("group1", "group2"), sep = " / ")
+
+results
+
+contrast_rep_F7_females <- results
+
+# Visualize the emmeans:
+plot(emmeans(model_1, pairwise ~ rep, 
+                      type="response"))
+
+```
+# Plot - emmeans
+```{r}
+pallete_treatments <- c("#af8dc3","#af8dc3",
+                        "#af8dc3","#af8dc3",
+                        "#af8dc3","#af8dc3")
+
+plot3 <- ggplot(predicted_means, aes(x = rep, y = response, fill = rep)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.9)) +
+  geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL),
+                position = position_dodge(width = 0.9),
+                width = 0.25) + 
+  scale_fill_manual(values = pallete_treatments) +  
+  labs(title = "",
+       x = "Replicate",
+       y = "Dry weight (mg / fly)") + 
+  scale_x_discrete(labels = (c("1", "2", "3", "4", "5", "6"))) +
+  theme_classic() +
+  theme(panel.grid = element_blank(),
+        legend.position = "none",
+        text = element_text(size = 12),
+        aspect.ratio = 1,
+        plot.margin = margin(0, 0, 0, 0),
+    axis.text.x = element_text(color="black", size = 12),
+    axis.ticks = element_line(color = "black"),
+    axis.text.y = element_text(color="black", size = 12)) +
+  coord_cartesian(ylim=c(0, 0.4))
+
+plot3
+
+```
+# #F7  Males
+# Fit the model
+```{r}
+model_1 <- lm(log10(mg_fly) ~ rep, data = big_F7_males) 
+
+summary(model_1)
+
+```
+# Check model assumptions:
+```{r}
+#Create model_1_dataset
+model_1_dataset <- big_F7_males
+## Introduce the residuals in the data-set:
+model_1_dataset$residuals <- residuals(model_1)
+
+# Homogeneity of variance:
+plot(predict(model_1), residuals(model_1))
+# Levene's test with one independent variable. 
+leveneTest(residuals ~ rep, data = model_1_dataset)
+# Q-Q plot of normal residuals
+qqPlot(residuals(model_1))
+
+# Normality test1:
+shapiro.test(residuals(model_1)) 
+
+# Normality test 2:
+#Kolmogorov-Smirnov test
+ks.test(residuals(model_1),"pnorm", mean(residuals(model_1)), sd(residuals(model_1))) 
+
+```
+# Contrasts:
+```{r}
+contrasts <- summary(emmeans(model_1, pairwise ~ rep, 
+                      type="response", adjust ="none")$contrasts) 
+
+
+# Predicted Means:
+predicted_means <- summary(emmeans(model_1, pairwise ~ rep, 
+                      type="response", adjust ="tukey")$emmeans) 
+
+contrasts
+predicted_means
+
+## Make a data-set with results:
+
+results <- as.data.frame(contrasts)
+results <- results %>%
+  separate(contrast, into = c("group1", "group2"), sep = " / ")
+
+
+contrast_rep_F7_males <- results
+
+# Visualize the emmeans:
+plot(emmeans(model_1, pairwise ~ rep, 
+                      type="response"))
+
+```
+# Plot - emmeans
+```{r}
+pallete_treatments <- c("#af8dc3","#af8dc3",
+                        "#af8dc3","#af8dc3",
+                        "#af8dc3","#af8dc3")
+
+plot4 <- ggplot(predicted_means, aes(x = rep, y = response, fill = rep)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.9)) +
+  geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL),
+                position = position_dodge(width = 0.9),
+                width = 0.25) + 
+  scale_fill_manual(values = pallete_treatments) +  
+  labs(title = "",
+       x = "Replicate",
+       y = "Dry weight (mg / fly)") + 
+  scale_x_discrete(labels = (c("1", "2", "3", "4", "5", "6"))) +
+  theme_classic() +
+   theme(panel.grid = element_blank(),
+        legend.position = "none",
+        text = element_text(size = 12),
+        aspect.ratio = 1,
+        plot.margin = margin(0, 0, 0, 0),
+    axis.text.x = element_text(color="black", size = 12),
+    axis.ticks = element_line(color = "black"),
+    axis.text.y = element_text(color="black", size = 12)) + 
+  coord_cartesian(ylim=c(0, 0.25))
+
+plot4
+
+```
+# #F31  Females
+# Fit the model
+```{r}
+model_1 <- lm(log10(mg_fly) ~ rep, data = big_F31_females) 
+summary(model_1)
+
+```
+# Check model assumptions:
+```{r}
+#Create model_1_dataset
+model_1_dataset <- big_F31_females
+## Introduce the residuals in the dataset:
+model_1_dataset$residuals <- residuals(model_1)
+
+# Homogeneity of variance:
+plot(predict(model_1), residuals(model_1))
+# Levene's test with one independent variable. 
+leveneTest(residuals ~ rep, data = model_1_dataset)
+# Q-Q plot of normal residuals
+qqPlot(residuals(model_1))
+
+# Normality test1:
+shapiro.test(residuals(model_1)) 
+
+# Normality test 2:
+#Kolmogorov-Smirnov test
+ks.test(residuals(model_1),"pnorm", mean(residuals(model_1)), sd(residuals(model_1))) 
+
+```
+# Remove 1 outlier and fit the model:
+```{r}
+model_1_dataset$unique_id <- paste(model_1_dataset$CGE, model_1_dataset$rep, model_1_dataset$subrep, sep="_")
+
+model_1_dataset <- model_1_dataset %>% dplyr::filter(!unique_id %in% c("CGE3_2_32_2")) 
+
+model_1 <- lm(log10(mg_fly) ~ rep, data = model_1_dataset) 
+
+summary(model_1)
+
+# Check model assumptions:
+
+## Introduce the residuals in the dataset:
+model_1_dataset$residuals <- residuals(model_1)
+
+# Homogeneity of variance:
+plot(predict(model_1), residuals(model_1))
+# Levene's test with one independent variable. 
+leveneTest(residuals ~ rep, data = model_1_dataset)
+# Q-Q plot of normal residuals
+qqPlot(residuals(model_1))
+
+# Normality test1:
+shapiro.test(residuals(model_1)) 
+
+# Normality test 2:
+#Kolmogorov-Smirnov test
+ks.test(residuals(model_1),"pnorm", mean(residuals(model_1)), sd(residuals(model_1))) 
+
+```
+# Contrasts:
+```{r}
+contrasts <- summary(emmeans(model_1, pairwise ~ rep, 
+                      type="response",
+                      adjust="none")$contrasts) 
+
+# Predicted Means:
+predicted_means <- summary(emmeans(model_1, pairwise ~ rep,
+                                   type="response",
+                      adjust="tukey")$emmeans) 
+
+## Make a data-set with results:
+
+results <- as.data.frame(contrasts)
+results <- results %>%
+  separate(contrast, into = c("group1", "group2"), sep = " / ")
+
+results
+
+contrast_rep_F31_females <- results
+
+# Visualize the emmeans:
+plot(emmeans(model_1, pairwise ~ rep, 
+                      type="response", adjust="tukey"))
+
+```
+# Plot - emmeans
+```{r}
+pallete_treatments <- c("#762a83","#762a83",
+                        "#762a83","#762a83",
+                        "#762a83","#762a83")
+
+plot5 <- ggplot(predicted_means, aes(x = rep, y = response, fill = rep)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.9)) +
+  geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL),
+                position = position_dodge(width = 0.9),
+                width = 0.25) + 
+  scale_fill_manual(values = pallete_treatments) +  
+  labs(title = "",
+       x = "Replicate",
+       y = "Dry weight (mg / fly)") + 
+  scale_x_discrete(labels = (c("1", "2", "3", "4", "5", "6"))) +
+  theme_classic() +
+  theme(panel.grid = element_blank(),
+        legend.position = "none",
+        text = element_text(size = 12),
+        aspect.ratio = 1,
+        plot.margin = margin(0, 0, 0, 0),
+    axis.text.x = element_text(color="black", size = 12),
+    axis.ticks = element_line(color = "black"),
+    axis.text.y = element_text(color="black", size = 12)) +
+  coord_cartesian(ylim=c(0, 0.4))
+
+
+plot5
+
+```
+# #F31  Males
+# Fit the model
+```{r}
+model_1 <- lm(log10(mg_fly) ~ rep , data = big_F31_males) 
+summary(model_1)
+
+```
+# Check model assumptions:
+```{r}
+#Create model_1_dataset
+model_1_dataset <- big_F31_males
+## Introduce the residuals in the dataset:
+model_1_dataset$residuals <- residuals(model_1)
+
+# Homogeneity of variance:
+plot(predict(model_1), residuals(model_1))
+# Levene's test with one independent variable. # Homogeneous variance! #p-value = 0.3298
+leveneTest(residuals ~ rep, data = model_1_dataset)
+# Q-Q plot of normal residuals
+qqPlot(residuals(model_1))
+
+# Normality test1:
+shapiro.test(residuals(model_1)) 
+
+# Normality test 2:
+#Kolmogorov-Smirnov test
+ks.test(residuals(model_1),"pnorm", mean(residuals(model_1)), sd(residuals(model_1))) 
+
+```
+# Remove 2 outliers and fit the model:
+To make residuals normal
+```{r}
+model_1_dataset$unique_id <- paste(model_1_dataset$CGE, model_1_dataset$rep, model_1_dataset$subrep, sep="_")
+
+model_1_dataset <- model_1_dataset %>% dplyr::filter(!unique_id %in% c("CGE3_2_31_2","CGE3_2_32_1")) 
+
+model_1 <-lm(log10(mg_fly) ~ rep, data = model_1_dataset) 
+summary(model_1)
+
+```
+# Check model assumptions:
+```{r}
+## Introduce the residuals in the dataset:
+model_1_dataset$residuals <- residuals(model_1)
+
+# Homogeneity of variance:
+plot(predict(model_1), residuals(model_1))
+# Levene's test with one independent variable. 
+leveneTest(residuals ~ rep, data = model_1_dataset)
+# Q-Q plot of normal residuals
+qqPlot(residuals(model_1))
+
+# Normality test1:
+shapiro.test(residuals(model_1)) 
+
+# Normality test 2:
+#Kolmogorov-Smirnov test
+ks.test(residuals(model_1),"pnorm", mean(residuals(model_1)), sd(residuals(model_1))) 
+
+```
+# Contrasts:
+```{r}
+contrasts <- summary(emmeans(model_1, pairwise ~ rep, 
+                      type="response", adjust="none")$contrasts)
+
+
+# Predicted Means:
+predicted_means <- summary(emmeans(model_1, pairwise ~ rep, 
+                      type="response", adjust="tukey")$emmeans) 
+
+contrasts
+
+predicted_means
+
+## Make a data-set with results:
+
+results <- as.data.frame(contrasts)
+results <- results %>%
+  separate(contrast, into = c("group1", "group2"), sep = " / ")
+
+results
+contrast_rep_F31_males <- results
+
+
+# Visualize the emmeans:
+plot(emmeans(model_1, pairwise ~ rep, 
+                      type="response", adjust="tukey"))
+
+```
+# Plot - emmean
+```{r}
+pallete_treatments <- c("#762a83","#762a83",
+                        "#762a83","#762a83",
+                        "#762a83","#762a83")
+
+plot6 <- ggplot(predicted_means, aes(x = rep, y = response, fill = rep)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.9)) +
+  geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL),
+                position = position_dodge(width = 0.9),
+                width = 0.25) + 
+  scale_fill_manual(values = pallete_treatments) +  
+  labs(title = "",
+       x = "Replicate",
+       y = "Dry weight (mg / fly)") + 
+  scale_x_discrete(labels = (c("1", "2", "3", "4", "5", "6"))) +
+  theme_classic() +
+  theme(panel.grid = element_blank(),
+        legend.position = "none",
+        text = element_text(size = 12),
+        aspect.ratio = 1,
+        plot.margin = margin(0, 0, 0, 0),
+    axis.text.x = element_text(color="black", size = 12),
+    axis.ticks = element_line(color = "black"),
+    axis.text.y = element_text(color="black", size = 12)) +
+  coord_cartesian(ylim=c(0, 0.25))
+# Add asterisks manually:
+  #annotate("text", x = 2, y = 110, label = "***", size = 6, color = "black") + 
+  #annotate("text", x = 5, y = 105, label = "***", size = 6, color = "black")   
+
+plot6
+
+```
+# Plot - emmeans females + males
+```{r}
+combined_plots <- plot3 + plot5 + plot4 + plot6
+
+combined_plots
+
+combined_plot <- plot3 + plot5 + plot4 + plot6 & 
+  theme(axis.title.x = element_blank(),  
+    axis.text.x = element_text(size = 14),  
+    axis.ticks.x = element_line()) 
+
+combined_plot <- wrap_elements(panel = combined_plot) +
+  labs(tag = "Replicate") +
+  theme(
+    plot.tag = element_text(size = 14),
+    plot.tag.position = "bottom")
+
+
+# Export plot:
+#ggsave("output_files/plots/High_order_phenotypes/dry_weight_model_rep_wise.svg", combined_plots)
+
+```
+# Final p-values: correction across all contrasts
+The p-value of emmeans was not corrected (p.value)
+```{r}
+contrast_rep_F7_females$group <- "females_F7"
+contrast_rep_F7_males$group <- "males_F7"
+contrast_rep_F31_females$group <- "females_F31"
+contrast_rep_F31_males$group <- "males_F31"
+
+combined_contrasts_weight_rep <- rbind(contrast_rep_F7_females,contrast_rep_F7_males,contrast_rep_F31_females,contrast_rep_F31_males)
+
+# Correct for multiple testing across all contrasts and sex:
+combined_contrasts_weight_rep$padj_fdr <- p.adjust(combined_contrasts_weight_rep$p.value, method = "fdr", n = length(combined_contrasts_weight_rep$p.value))
+combined_contrasts_weight_rep
+
+# Export results:
+#write.xlsx(results, file = "output_files/S4_models_high_order_phenotypes.xlsx", sheetName="weight_repwise", append=TRUE)
+
+```
+--- END ---

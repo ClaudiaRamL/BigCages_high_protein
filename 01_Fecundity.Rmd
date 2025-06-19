@@ -1,0 +1,674 @@
+---
+title: "High-Protein BigCages - Fecundity"
+Author: "Claudia Ramirez-Lanzas"
+Date: "06/02/2025"
+---
+
+# Load libraries:
+```{r}
+# Data handling:
+library("readxl")
+library("writexl")
+library("xlsx")
+library("tidyverse")
+
+# Statistics:
+library("lme4")
+library("lmerTest") # to include approximate p-values in the output of lmer. 
+library("emmeans")
+library("car")
+library("HLMdiag")
+library("ggeffects")
+
+# Plotting:
+library("patchwork")
+library("ggplot2")
+library("ggpubr") 
+
+
+```
+
+```{r}
+sessionInfo()
+```
+# Import files:
+```{r}
+fecundity_Big <- read_csv("input_files/BigCages_fecundity_weight_per_transfer.csv", show_col_types = FALSE)
+```
+
+```{r}
+str(fecundity)
+```
+# ####Part 1: investigate raw data
+# Designate variables as a categorical and numerical factors:
+```{r}
+# Format the variables:
+cols_factor <- c("CGE","generation","day","transfer", "rep", "subrep", 
+                 "subsubrep", "treatment")
+cols_numeric <- c("nb_eggs", "nb_females", "nb_males", "total_flies",
+                  "females_mg", "females_g", "males_mg", "males_g")
+fecundity_Big[cols_factor] <- lapply(fecundity_Big[cols_factor], as.factor)
+fecundity_Big[cols_numeric] <- lapply(fecundity_Big[cols_numeric], as.numeric)
+
+# re-order factor levels for treatment:
+fecundity_Big$treatment <- factor(fecundity_Big$treatment, 
+                                   levels=c("base", "trial_big"))
+
+# re-order factor levels for generation:
+fecundity_Big$generation <- factor(fecundity_Big$generation, 
+                                    levels=c("gen0", "gen7", "gen31"))
+
+# Include subsubrep for trial_big replicates:
+fecundity_Big <- fecundity_Big %>% dplyr::mutate(subsubrep = replace_na(subsubrep, "1"))
+
+```
+# Normalize fecundity by number of females and dry weight:
+```{r}
+fecundity_Big_transfer <- fecundity_Big 
+fecundity_Big_transfer$eggs_female <- fecundity_Big_transfer$nb_eggs / fecundity_Big_transfer$nb_females
+fecundity_Big_transfer$eggs_mg <- fecundity_Big_transfer$nb_eggs / fecundity_Big_transfer$females_mg
+
+```
+# Compute total fecundity (7 days) and normalize by nb_females and total_mg:
+```{r}
+# Aggregate data so number of females is added for 7 days.
+fecundity_Big_total <- aggregate(nb_eggs ~ CGE + 
+                                   generation + 
+                                   treatment + 
+                                    rep + 
+                                   subrep + 
+                                   subsubrep + 
+                                   nb_females + 
+                                   nb_males +
+                                   total_flies +
+                                   females_mg,
+                                  data = as.data.frame(fecundity_Big), 
+                                  FUN = sum, na.rm = TRUE)
+
+
+# Compute mg dry weight per female:
+fecundity_Big_total$mg_female <- fecundity_Big_total$females_mg / fecundity_Big_total$nb_females
+# Compute fecundity_total by dividing total nb_eggs in 7 days per nb_females:
+fecundity_Big_total$eggs_female <- fecundity_Big_total$nb_eggs / fecundity_Big_total$nb_females
+# Compute fecundity_total by dividing total nb_eggs in 7 days per total dry weight:
+fecundity_Big_total$eggs_mg <- fecundity_Big_total$nb_eggs / fecundity_Big_total$females_mg
+
+```
+# Export BigCages_fecundity_total
+```{r}
+export_df <- fecundity_Big_total
+
+#write_csv(export_df, "input_files/BigCages_fecundity_total.csv")
+  
+```
+
+
+# Compute daily fecundity:
+```{r}
+# Aggregate data so number of eggs is added for each day:
+fecundity_day_Big <- aggregate(eggs_female ~ CGE + 
+                                   generation + 
+                                   treatment + 
+                                    rep + 
+                                   subrep + 
+                                   subsubrep + 
+                                   nb_females + 
+                                   females_mg + day, 
+                                  data = as.data.frame(fecundity_Big_transfer), 
+                                  FUN = sum, na.rm = TRUE)
+```
+# Compute total fecundity (7 days) and normalize by nb_females and total_mg:
+```{r}
+# Aggregate data so number of females is added for 7 days.
+fecundity_Big_total <- aggregate(nb_eggs ~ CGE + 
+                                   generation + 
+                                   treatment + 
+                                    rep + 
+                                   subrep + 
+                                   subsubrep + 
+                                   nb_females + 
+                                   females_mg,
+                                  data = as.data.frame(fecundity_Big), 
+                                  FUN = sum, na.rm = TRUE)
+
+# Compute mg dry weight per female:
+fecundity_Big_total$mg_female <- fecundity_Big_total$females_mg / fecundity_Big_total$nb_females
+# Compute fecundity_total by dividing total nb_eggs in 7 days per nb_females:
+fecundity_Big_total$eggs_female <- fecundity_Big_total$nb_eggs / fecundity_Big_total$nb_females
+# Compute fecundity_total by dividing total nb_eggs in 7 days per total dry weight:
+fecundity_Big_total$eggs_mg <- fecundity_Big_total$nb_eggs / fecundity_Big_total$females_mg
+
+```
+## Remove 2 outliers in Big Cages - total and daily datasets
+We have evidences that CGE2_2_35_2 & CGE2_2_35_3 samples should be removed: our
+notebook indicates that many flies escaped at once during the fecundity assay
+meaning that the fecundity measurements of previous days will be overestimated.
+```{r}
+# Create unique ID:
+fecundity_Big_total$unique_id <- paste(fecundity_Big_total$CGE, fecundity_Big_total$rep, fecundity_Big_total$subrep, sep="_")
+# Remove samples:
+fecundity_Big_filter <- fecundity_Big_total %>% dplyr::filter(!unique_id %in% c("CGE2_2_35_2", "CGE2_2_35_3"))
+
+# Create unique ID:
+fecundity_day_Big$unique_id <- paste(fecundity_day_Big$CGE, fecundity_day_Big$rep, fecundity_day_Big$subrep,  sep="_")
+# Remove samples:
+fecundity_day_Big_filter <- fecundity_day_Big %>% dplyr::filter(!unique_id %in% c("CGE2_2_35_2", "CGE2_2_35_3"))
+
+```
+# Plot - total fecundity
+```{r}
+# Fecundity normalized by number of females:
+pallete_treatments <- c("orange","#af8dc3","#762a83")
+
+
+fecundity_Big_filter %>%
+  ggplot(aes(x=generation, y=eggs_female, fill=generation))  +
+  geom_boxplot(outlier.size = 0.0001) + 
+  geom_text(data = fecundity_Big_filter %>% filter(!is.na(eggs_female)), 
+            aes(label = ifelse(eggs_female > quantile(eggs_female, 0.75) + 1.5 * IQR(eggs_female) | 
+                               eggs_female < quantile(eggs_female, 0.25) - 1.5 * IQR(eggs_female), 
+                             as.character(rep), "")),
+            position = position_dodge(width = 0.75), vjust = -0.5) + 
+  labs(title="Total fecundity per generation") + 
+  scale_fill_manual(values = pallete_treatments) +  
+  ylab("Fecundity (No eggs / fly / 7 days)") + 
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 10)) +
+  guides(fill = FALSE) +
+  theme_light() +
+  theme(panel.grid = element_blank(),
+        legend.position = "none",
+        text = element_text(size = 13)) + 
+  xlab("")
+
+```
+# Plot - daily fecundity
+```{r}
+# Fecundity normalized by number of females:
+pallete_treatments <- c("orange","#af8dc3","#762a83")
+
+
+plot_daily_fec <- fecundity_day_Big_filter %>%
+  ggplot(aes(x = day, y = eggs_female, fill = generation))  +
+  geom_boxplot(outlier.size = 0.0001, show.legend = TRUE) +
+  scale_fill_manual(values = pallete_treatments,
+                    labels = c("Gen 0", "Gen 7", "Gen 31"),
+                    name ="") +  
+  ylab("Fecundity (No eggs / fly)") + 
+  theme_classic() +
+  theme(panel.grid = element_blank(),
+        legend.position = "bottom",
+        text = element_text(size = 14)) + 
+  xlab("") +
+  scale_x_discrete(labels = c("1","2","3","4","5","6","7")) + 
+  xlab("Day")
+
+plot_daily_fec
+
+# Export plot:
+#ggsave("output_files/plots/High_order_phenotypes/final_version/fecundity_daily_raw_data.png",
+       #plot_daily_fec,
+       #dpi=400,
+       #units = "mm",
+        #height = 150, width=150)
+
+# Print mean:
+fecundity_day_Big_filter %>% group_by(generation, day) %>%
+  summarize(mean_fecundity = mean(eggs_female),
+            median_fecundity= median(eggs_female), max_fec = max(eggs_female))
+
+```
+# ####Part 2: overall model  
+Here we test the difference in fecundity across generations 0, 7 and 31.
+## Create model_dataset:
+```{r}
+model_dataset <- fecundity_Big_filter
+
+# Homogenize labeling:
+model_dataset$subrep <- sub("^0", "", model_dataset$subrep)
+model_dataset$subsubrep <- sub("^0", "", model_dataset$subsubrep)
+model_dataset <- model_dataset %>%
+  mutate(subsubrep = case_when(subsubrep == "NA" ~ "1", TRUE ~ subsubrep))
+
+
+#Generations random slopes:
+### Dummy coding and centering of random slope categorical variables: 
+model_dataset$gen_7_dummy <- as.numeric(
+  model_dataset$generation == levels(model_dataset$generation)[2]) # Dummy codding for 2nd level
+model_dataset$gen_7_dummy <- model_dataset$gen_7_dummy - 
+  mean(model_dataset$gen_7_dummy) # Centering
+model_dataset$gen_31_dummy <- as.numeric(
+  model_dataset$generation == levels(model_dataset$generation)[3]) # Dummy codding for 3rd level
+model_dataset$gen_31_dummy <- model_dataset$gen_31_dummy - 
+  mean(model_dataset$gen_31_dummy) # Centering
+
+# Format the variables:
+cols_factor <- c("CGE",
+                 "rep", 
+                 "subrep", 
+                 "generation",
+                 "unique_id")
+model_dataset[cols_factor] <- lapply(model_dataset[cols_factor], as.factor)
+
+model_dataset$generation <- factor(model_dataset$generation,
+                            levels = c("gen0", "gen7","gen31"))
+
+head(model_dataset)
+
+```
+
+## Fit the model:
+```{r}
+
+model_1 <-  lmer(log10(eggs_female) ~ generation + mg_female + (1 + gen_7_dummy + gen_31_dummy || rep), data = model_dataset, REML = FALSE)
+summary(model_1)
+
+# Introduce the residuals in the data-set:
+model_dataset_1 <- model_dataset
+model_dataset_1$residuals <- residuals(model_1)
+
+```
+1 + Allows for a random intercept per rep, meaning each replicate can have
+a different baseline level of eggs_female.
+generation_7_dummy and generation_31_dummy: allow the slopes of gen 7 and gen 31
+to vary by rep, meaning the effect of  generations can differ across replicates.
+
+## Check model assumptions:
+```{r}
+# Homogeneity of variance:
+#Predicted values are plotted against residuals to assess variance homogeneity.
+plot(predict(model_1), residuals(model_1))
+# Levene's test with one independent variable. 
+leveneTest(residuals ~ generation, data = model_dataset_1)
+
+# Normality of residuals:
+# Q-Q plot of normal residuals:
+qqPlot(residuals(model_1))
+# Normality test 1:
+#Shapiro-Wilk’s method is widely recommended for normality test 
+#and it provides better power than K-S. It is based on the 
+#correlation between the data and the corresponding normal scores.
+shapiro.test(residuals(model_1)) 
+
+# Check assumptions for random intercept term:
+# Are random intercept normally distributed?
+ranef_rep <- ranef(model_1)[[1]]
+ranef_rep$rep <- rownames(ranef_rep)
+ranef_rep <- merge(ranef_rep, model_dataset_1[!duplicated(model_dataset_1$rep), 
+                                              c("generation","CGE", "rep")], by = "rep")
+
+qqnorm(ranef_rep$`(Intercept)`, 
+       main="QQ Plot for random intercepts per Generation", 
+       col = ranef_rep$generation, pch =19)
+
+```
+# Contrast - generations
+```{r}
+
+contrasts <- summary(emmeans(model_1, pairwise ~ generation, 
+                      type="response", adjust="tukey")$contrasts)
+
+# Predicted Means:
+predicted_means <- summary(emmeans(model_1, pairwise ~ generation, 
+                      type="response")$emmeans) 
+
+# Make generation a continuous variable for plotting:
+predicted_means <- predicted_means %>% dplyr::mutate(generation = case_when(generation == "gen0" ~ 0, 
+                                                                            generation == "gen7" ~ 7,
+                                                                            generation == "gen31" ~ 31))
+
+# Change generation scale to reduce distances proportionally for plotting:
+predicted_means <- predicted_means %>% dplyr::mutate(generation_label = case_when(generation == "0" ~ 0.0, 
+                                                                            generation == "7" ~ 0.5,
+                                                                            generation == "31" ~ 1.5))
+
+# Visualize the emmeans:
+plot(emmeans(model_1, pairwise ~ generation, 
+                      type="response", adjust="tukey"))
+
+## Make a data-set with results:
+results <- as.data.frame(contrasts)
+results <- results %>%
+  separate(contrast,
+           into = c("group1", "group2"), sep = " / ")
+
+results
+
+# Export results:
+#write.xlsx(results, file = "output_files/S4_models_high_order_phenotypes.xlsx", sheetName="fec_overall", append=TRUE)
+
+```
+# Plot - emmeans
+```{r}
+
+plot_overall_fec <- predicted_means %>% ggplot(
+  aes(x = (generation_label),
+      y = response, fill = as.factor(generation_label))) + 
+  geom_bar(stat = "identity", 
+           position = position_dodge(width = 0.4),
+           width=0.3) +
+  geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL),
+                position = position_dodge(width = 0.3),  
+                width = 0.1) + 
+  scale_fill_manual(values = c("#f1a340","#af8dc3", "#762a83")) +  
+  labs(title = "",
+       x = "",
+       y = "Fecundity (No. eggs / fly / 7 days)") +  
+  theme_classic() +
+  xlab("Generation") + 
+  theme(aspect.ratio = 1, plot.margin = margin(0, 0, 0, 0)) + 
+  theme(axis.text.x.top  = element_blank(),
+        #axis.line.x.top = element_blank(),
+        #axis.ticks.x.top = element_blank(),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_text(size = 14),
+    axis.text.x = element_text(size = 14, color = "black"),
+    axis.text.y = element_text(size = 14, color = "black"),
+    axis.line = element_line(color='black'),
+    plot.background = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    legend.position="none") +
+  coord_cartesian(ylim = c(0, 100)) +
+  scale_x_continuous(breaks = c(0, 0.5, 1.5),
+                     labels = c(0,7,31))
+
+
+plot_overall_fec 
+
+# Export plot:
+#ggsave("output_files/plots/High_order_phenotypes/fecundity_overall_emmeans.svg",
+#plot_overall_fec, units = "mm", height = 150, width = 150)
+
+
+```
+
+# ####Part 3: model replicate-wise model 
+Here we test the difference in fecundity across the 6 different replicates
+at generation 7 and at generation 31 by fitting one model for each generation.
+## Create  datasets for F7 and F31:
+```{r}
+model_dataset <- fecundity_Big_filter
+
+# Homogenize labeling:
+model_dataset$subrep <- sub("^0", "", model_dataset$subrep)
+model_dataset$subsubrep <- sub("^0", "", model_dataset$subsubrep)
+model_dataset <- model_dataset %>% mutate(subsubrep = case_when(subsubrep == "NA" ~ "1", TRUE ~ subsubrep))
+
+# Subset data-sets for the F7 models:
+big_F7 <- model_dataset %>% filter(generation == "gen7") 
+# Format the variables:
+cols_factor <- c("rep", 
+                 "subrep", 
+                 "subsubrep", "generation", "CGE")
+
+big_F7[cols_factor] <- lapply(big_F7[cols_factor], as.factor)
+
+## 
+# Subset data-sets for the F31 models:
+big_F31 <- model_dataset %>% filter(generation == "gen31") 
+# Format the variables:
+cols_factor <- c("rep", 
+                 "subrep", 
+                 "subsubrep", "generation", "CGE")
+
+big_F31[cols_factor] <- lapply(big_F31[cols_factor], as.factor)
+
+```
+# Fit the model - F7:
+We fit a simple linear model with replicate as a fixed categorical variable for
+replicate and fixed continuous variable for weight, since we have added weight
+in the overall model. 
+```{r}
+
+# Fit the model:
+model_1 <- lm(log10(eggs_female) ~ rep + mg_female, data = big_F7) 
+summary(model_1)
+
+#Create model_dataset_1
+model_dataset_1 <- big_F7
+## Introduce the residuals in the dataset:
+model_dataset_1$residuals <- residuals(model_1)
+
+```
+# Check model assumptions:
+```{r}
+
+# Homogeneity of variance:
+plot(predict(model_1), residuals(model_1))
+# Levene's test with one independent variable. 
+leveneTest(residuals ~ rep, data = model_dataset_1)
+# Q-Q plot of normal residuals
+qqPlot(residuals(model_1))
+
+# Normality test1:
+shapiro.test(residuals(model_1)) 
+
+# Normality test 2:
+#Kolmogorov-Smirnov test
+ks.test(residuals(model_1),"pnorm", mean(residuals(model_1)), sd(residuals(model_1))) 
+
+
+```
+# Remove 2 outliers and fit the model:
+```{r}
+model_dataset_1 <- model_dataset_1 %>% dplyr::filter(unique_id != c("CGE2_2_34_3", "CGE2_2_33_2"))
+
+model_1 <- lm(log10(eggs_female) ~ rep + mg_female, data = model_dataset_1) 
+summary(model_1)
+
+# Homogeneity of variance:
+plot(predict(model_1), residuals(model_1))
+# Levene's test with one independent variable. 
+leveneTest(residuals ~ rep, data = model_dataset_1)
+# Q-Q plot of normal residuals
+qqPlot(residuals(model_1))
+
+# Normality test1:
+shapiro.test(residuals(model_1)) 
+
+# Normality test 2:
+#Kolmogorov-Smirnov test
+ks.test(residuals(model_1),"pnorm", mean(residuals(model_1)), sd(residuals(model_1))) 
+
+```
+# Contrasts:
+```{r}
+contrasts <- summary(emmeans(model_1, pairwise ~ rep, 
+                      type="response", adjust="none")$contrasts)
+
+# Predicted Means:
+predicted_means <- summary(emmeans(model_1, pairwise ~ rep, 
+                      type="response", adjust="tukey")$emmeans) 
+
+predicted_means
+
+## Make a data-set with results:
+results_F7 <- as.data.frame(contrasts)
+results_F7 <- results_F7 %>%
+  separate(contrast, into = c("group1", "group2"), sep = " / ")
+
+results_F7
+
+
+# Visualize the emmeans:
+plot(emmeans(model_1, pairwise ~ rep, 
+                      type="response", adjust="tukey"))
+
+```
+# Plot - emmeans F7
+```{r}
+pallete_treatments <- c("#af8dc3","#af8dc3",
+                        "#af8dc3","#af8dc3",
+                        "#af8dc3","#af8dc3")
+
+plot_F7 <- ggplot(predicted_means, aes(x = rep, y = response, fill = rep)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.9)) +
+  geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL),
+                position = position_dodge(width = 0.9),
+                width = 0.25) + 
+  scale_fill_manual(values = pallete_treatments) +  
+  labs(title = "Generation 7",
+       x = "Replicate",
+       y = "Fecundity (No eggs / fly / 7 days)") + 
+  scale_x_discrete(labels = (c("1", "2", "3", "4", "5", "6"))) +
+  theme_minimal() +
+  theme(panel.grid = element_blank(),
+        legend.position = "none",
+        text = element_text(size = 20)) + 
+  theme(aspect.ratio = 1) +  
+  theme(plot.margin = margin(0, 0, 0, 0)) + theme(
+    axis.text.x = element_text(color="black"),
+    axis.ticks = element_line(color = "black"),
+    axis.text.y = element_text(color="black"), 
+    axis.line = element_line(color = "black")) + coord_cartesian(ylim = c(0,100))
+
+
+plot_F7
+
+```
+# Fit the model - F31:
+```{r}
+
+# Fit simpler model:
+model_1 <- lm(log10(eggs_female) ~ rep + mg_female, data = big_F31) 
+summary(model_1)
+#Create model_dataset_1
+model_dataset_1 <- big_F31
+## Introduce the residuals in the dataset:
+model_dataset_1$residuals <- residuals(model_1)
+
+```
+# Check model assumptions:
+```{r}
+
+# Homogeneity of variance:
+plot(predict(model_1), residuals(model_1))
+# Levene's test with one independent variable. 
+leveneTest(residuals ~ rep, data = model_dataset_1)
+# Q-Q plot of normal residuals
+qqPlot(residuals(model_1))
+
+# Normality test1:
+shapiro.test(residuals(model_1)) 
+
+# Normality test 2:
+#Kolmogorov-Smirnov test
+ks.test(residuals(model_1),"pnorm", mean(residuals(model_1)), sd(residuals(model_1))) 
+
+```
+# Remove 1 outlier and fit the model:
+```{r}
+model_dataset_1 <- model_dataset_1 %>% dplyr::filter(unique_id != "CGE3_2_34_1")
+
+model_1 <- lm(log10(eggs_female) ~ rep + mg_female, data = model_dataset_1) 
+summary(model_1)
+
+# Homogeneity of variance:
+plot(predict(model_1), residuals(model_1))
+# Levene's test with one independent variable. 
+leveneTest(residuals ~ rep, data = model_dataset_1)
+# Q-Q plot of normal residuals
+qqPlot(residuals(model_1))
+
+# Normality test1:
+shapiro.test(residuals(model_1)) 
+
+# Normality test 2:
+#Kolmogorov-Smirnov test
+ks.test(residuals(model_1),"pnorm", mean(residuals(model_1)), sd(residuals(model_1))) 
+
+```
+# Contrasts:
+```{r}
+contrasts <- summary(emmeans(model_1, pairwise ~ rep, 
+                      type="response", adjust="none")$contrasts) 
+# Predicted Means:
+predicted_means <- summary(emmeans(model_1, pairwise ~ rep, 
+                      type="response", adjust="tukey")$emmeans) 
+
+predicted_means
+
+## Make a data-set with results:
+results_F31 <- as.data.frame(contrasts)
+results_F31 <- results_F31 %>%
+  separate(contrast, into = c("group1", "group2"), sep = " / ")
+
+results_F31
+
+
+# Visualize the emmeans:
+plot(emmeans(model_1, pairwise ~ rep, 
+                      type="response", adjust="tukey"))
+
+```
+# Plot - emmeans F7
+```{r}
+pallete_treatments <- c("#762a83","#762a83",
+                        "#762a83","#762a83",
+                        "#762a83","#762a83")
+
+plot_F31 <- ggplot(predicted_means, aes(x = rep, y = response, fill = rep)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.9)) +
+  geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL),
+                position = position_dodge(width = 0.9),
+                width = 0.25) + 
+  scale_fill_manual(values = pallete_treatments) +  
+  labs(title = "Generation 31",
+       x = "Replicate",
+       y = "") + #Fecundity (No eggs / fly / 7 days)
+  scale_x_discrete(labels = (c("1", "2", "3", "4", "5", "6"))) +
+  theme_minimal() +
+  theme(panel.grid = element_blank(),
+        legend.position = "none",
+        text = element_text(size = 20)) + 
+  theme(aspect.ratio = 1) +  
+  theme(plot.margin = margin(0, 0, 0, 0)) + theme(
+    axis.text.x = element_text(color="black"),
+    axis.ticks = element_line(color = "black"),
+    axis.text.y = element_text(color="black"), 
+    axis.line = element_line(color = "black")) + coord_cartesian(ylim = c(0,100))
+
+
+plot_F31
+```
+# Plot emmeans - F7 F31
+```{r}
+# Combine the plots using patchwork
+combined_plot <- plot_F7 + plot_F31 & 
+  theme(axis.title.x = element_blank(),  
+    axis.text.x = element_text(size = 16),  
+    axis.ticks.x = element_line()) 
+
+combined_plot_rep_fec <- wrap_elements(panel = combined_plot) +
+  labs(tag = "Replicate") +
+  theme(
+    plot.tag = element_text(size = 16),
+    plot.tag.position = "bottom")
+
+combined_plot_rep_fec
+
+
+# Export plot:
+#ggsave("output_files/plots/High_order_phenotypes/fecundity_repwise_emmeans.svg",
+#combined_plot_rep_fec, units = "mm", height = 150, width = 150)
+
+```
+# Final p-values: correction across all contrasts
+The p-value of emmeans was not corrected (p.value), here we correct across all
+contrasts using FDR.
+```{r}
+results_F7$group <- "F7"
+results_F31$group <- "F31"
+
+combined_contrasts_fecundity_rep <- rbind(results_F7,results_F31)
+
+# Correct for multiple testing across all contrasts and sex:
+combined_contrasts_fecundity_rep$padj_fdr <- p.adjust(combined_contrasts_fecundity_rep$p.value, method = "fdr", n = length(combined_contrasts_fecundity_rep$p.value))
+combined_contrasts_fecundity_rep
+
+# Export results:
+#write.xlsx(results, file = "output_files/S4_models_high_order_phenotypes.xlsx", sheetName="fec_repwise", append=TRUE)
+
+```
+
+--- END ---

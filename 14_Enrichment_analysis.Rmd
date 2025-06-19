@@ -1,0 +1,1283 @@
+---
+title: "High-Protein BigCages - Enrichment analysis"
+Author: "Claudia Ramirez-Lanzas"
+Date: "3/06/2024"
+---
+
+# Load libraries:
+```{r}
+# Data handling:
+library("readxl") 
+library("writexl") 
+library("tidyverse") 
+
+# Plotting:
+library("ggplot2")  
+library("svglite") 
+library("patchwork") 
+library("gridExtra") 
+library("khroma") # plotting colour blind safe
+library("viridis")
+
+# For enrichment tests:
+library("org.Dm.eg.db")
+library("AnnotationDbi") 
+library("topGO") # GO enrichment analysis
+library("clusterProfiler") # Pathway Enrichment Analysis (using KEGG)
+
+```
+# Check sessionInfo:
+```{r}
+sessionInfo()
+
+```
+
+# Set-up colors:
+```{r}
+bright <- color("bright")
+plot_scheme(bright(6), colours = TRUE, names = TRUE, size = 0.9)
+#
+muted <- color("muted")
+plot_scheme(muted(9), colours = TRUE, names = TRUE, size = 0.9)
+
+color_plateau <- muted(9)[2] #"#332288"
+color_monotonic <- muted(9)[7] #"#44AA99"
+#color_late_response <-  muted(9)[3] #"#DDCC77"
+color_late_response <-  "#D4AF37"
+color_incomplete_reversed <- muted(9)[9] #"#AA4499"
+color_complete_reversed <- muted(9)[5] #"#88CCEE" 
+color_shared <- muted(9)[1] #"#CC6677" 
+
+plot_scheme(muted(9)[2], colours = TRUE, names = TRUE, size = 0.9)
+plot_scheme(muted(9)[7], colours = TRUE, names = TRUE, size = 0.9)
+plot_scheme(muted(9)[9], colours = TRUE, names = TRUE, size = 0.9)
+plot_scheme(muted(9)[3], colours = TRUE, names = TRUE, size = 0.9)
+plot_scheme(muted(9)[5], colours = TRUE, names = TRUE, size = 0.9)
+plot_scheme(muted(9)[1], colours = TRUE, names = TRUE, size = 0.9)
+
+```
+
+# Import files:
+```{r}
+classify_trajectories <- read_csv("input_files/classify_trajectories_df.csv", show_col_types = FALSE)
+
+DE_results <- read_csv("input_files/DE_overall_results.csv", show_col_types = FALSE)
+
+fly_atlas2_FPKM <- read_csv("input_files/FlyAtlas2_gene_data_2023.csv", show_col_types = FALSE)
+
+DE_rep_wise_results <- read_csv("input_files/DE_repwise_results.csv", show_col_types = FALSE)
+
+shared_upset_data <- read_csv("input_files/shared_upset_data.csv", show_col_types = FALSE)
+
+```
+
+* classify_trajectories: contains all genes classified by transcriptomic trajectory.
+
+* DE_results: contains the results of DE analysis using dream model. 
+Including contrasts: B_F7, B_F32 and  F7_vs_F31. P-values corrected across the 3 contrasts.
+
+* fly_atlas2_FPKM: contains the gene expression data-set from Flyatlas2 (only FPKM data )
+(downloaded on September 2023). 
+
+* DE_rep_wise_results: contains the results of DE analysis using dream model. 
+Including contrasts: Base vs evolved replicate.
+All replicates were compared to base independently in each generation.
+Each replicated had 3 samples. P-values corrected across all contrasts. 
+
+* shared_upset_data: it contains the data-set used to make the UpSet plots.
+It contains information about the DEGs detected in the replicate specific DE
+analysis. That is, each replicate was compared to the Base and the DEGs were
+compared to the other 5 replicates leading to 6 categories of parallelism
+(ranging from 1 (private DEGs) to 6 (shared by all replicates)).
+
+## Function 1: computes 2x2 contingency tables
+The cont_table function calculates a 2x2 contingency table. 
+
+The function calculates the four counts needed for the contingency table:
+
+Arguments:
+*query: a set of genes for testing. 
+*background: all genes used in DE analysis
+*classifyer: the genes associated "significantly" with a tissue (FlyAtlas2)
+
+```{r}
+
+cont_table <- function(query, background, classifyer){
+  # Genes of interest associated to tissue: 
+  p1 <- length(Reduce(intersect, list(query, background, classifyer))) 
+  # genes-of-interest NOT associated to tissue 
+  q1 <- length(intersect(query, background)) - p1 
+  # NOT genes-of-interest associated to tissue.
+  p0 <- length(setdiff(intersect(background, classifyer), intersect(query, classifyer))) 
+  # Background genes (NOT genes-of-interest) NOT associated to tissue
+  q0 <- length(setdiff(background, query)) - p0 
+  # Returns a contingency table:
+  return(matrix(c(p1, p0, q1, q0), 2, 2))
+  }
+
+```
+## Function 2: performs tissue enrichment across gene sets:
+This function uses code modified from 
+"Sheng-Kai et al., (2020)
+Rapid sex-specific adaptation to high temperature in Drosophila eLife 9:e53237"
+
+This function performs tissue enrichment on different tissues provided in flyAtlas2 data-set.
+
+This function takes a list of queries (sets of genes) and performs 
+Tissue Enrichment using Flyatlas2 (only male tissues). To extend it to other 
+tissues the function should be modified. 
+
+Arguments:
+
+*queries <- a list of named data-frames. Each one contains a set of genes (gene names) that should be tested. 
+
+*background <- the background of genes is understood as "all genes that could have been included in the enrichment analysis". 
+In our case, all genes in the genome of Drosophila simulans after filtering by low-expression. 
+
+*flyatlas_data: the complete flyatlas2 data-set (contains all tissues).
+
+Details: 
+- This function assumes as tissue-specific genes those that express at log2FC > 2. 
+```{r}
+perform_enrichment_analysis <- function(queries, background, flyatlas_data) {
+  # Initialize variables:
+  p.val <- c()
+  odds <- c()
+  exp.num <- c()
+  tissue_enriched_ID <- list()
+  tissue_enriched_ID_2 <- c()
+  
+  # For loop trough the columns of flyatlas2 containing male tissues (91 to 105):
+  for (i in seq(91, 105, 1)) {
+    # Select the genes (FB) that are tissue specific (log2FC > 2 compared to the whole body):
+    tissue_specific_ID <- flyatlas_data$FB[!is.na(flyatlas_data[, i]) & flyatlas_data[, i] > 2] # log2FC>2 or FC > 4
+    p <- c() # p-value of Fisher´s test
+    o <- c() # odds ratio
+    e <- c() # expected genes
+    g <- list()
+    # Loop trough the different queries of a list of data-sets:
+    for (j in seq_along(queries)) {
+      query_df <- queries[[j]]
+      query_col_name <- names(query_df)
+      query <- query_df[[query_col_name]] # Access the column using the column name
+      # compute fisher test for each tissue:
+      p <- c(p, fisher.test(cont_table(query, background, tissue_specific_ID), alternative = "greater")$p.value)
+      # odds ration:
+      o <- c(o, fisher.test(cont_table(query, background, tissue_specific_ID), alternative = "greater")$estimate)
+      # 
+      g[[j]] <- intersect(query, tissue_specific_ID)
+      # expected numbers by chance:
+      e <- c(e, length(query) * sum(tissue_specific_ID %in% background) / length(background))
+    }
+    
+    p.val <- rbind(p.val, p)
+    odds <- rbind(odds, o)
+    tissue_enriched_ID[[i - 90]] <- g
+    exp.num <- rbind(exp.num, e)
+    tissue_enriched_ID_2 <- rbind(tissue_enriched_ID_2, tissue_enriched_ID[[i - 90]])
+
+    }
+  
+  # Round expected values:
+  exp.num <- round(exp.num, 0)
+  
+  # Calculate observed numbers of enriched genes for each tissue:
+  obs.num <- as.data.frame(t(sapply(tissue_enriched_ID, function(x) sapply(x, length)))[, ])
+
+  # Perform multiple testing correction:
+  padj <- matrix(p.adjust(p.val[, ], method = "BH"), length(exp.num), length(queries))
+ 
+  # Modify row and column names for visualization:
+  query_names <- sapply(queries, function(df) names(df))
+  names(tissue_enriched_ID) <- strsplit(colnames(flyatlas_data)[seq(91, 105, 1)], split = " ") # Male tissues 
+  
+  # Extract male tissues names:
+  split_names <- strsplit(colnames(flyatlas_data)[seq(91, 105, 1)], split = "_")
+  # Keep only tissue name:
+  first_words <- lapply(split_names, function(x) x[1])
+  # Assign these tissue names to tissue_enriched_ID:
+  names(tissue_enriched_ID) <- unlist(first_words)
+
+  # Prepare data-sets:
+  rownames(padj) <- names(tissue_enriched_ID)
+  colnames(padj) <- paste(query_names, sapply(query_names, length))
+  rownames(odds) <- names(tissue_enriched_ID)
+  colnames(odds) <- paste(query_names, sapply(query_names, length))
+  rownames(exp.num) <- names(tissue_enriched_ID)
+  row.names(obs.num) <- names(tissue_enriched_ID)
+  colnames(obs.num) <- paste(query_names, sapply(query_names, length))
+  row.names(tissue_enriched_ID_2) <- names(tissue_enriched_ID)
+  colnames(tissue_enriched_ID_2) <- paste(query_names, sapply(query_names, length))
+  
+  res_tiss_enrich <- cbind(obs.num, exp.num, padj, odds, tissue_enriched_ID_2)
+  colnames(res_tiss_enrich) <- c("observed_num", "expected_num", "padj", "odds", "gene_list")
+  res_tiss_enrich$tissue <- rownames(res_tiss_enrich)
+  
+  return(res_tiss_enrich) }
+
+```
+
+## Function 3: prepare Genelists 
+This function create gene lists for enrichment analyses.
+The gene lists are named vectors where names are the genes ids and the
+values are 1 or 0; 1 when the gene belongs to the testing set and 0 when
+it doesn't belong to it. 
+The testing set is defined by all genes with 1 and the background with all
+genes (0s or 1s). 
+
+Arguments:
+*gene_per_group: a data-set containing gene_ids and the group they belong to. 
+*all_DE_results: a data-set containing the results of Differential Expression analysis.
+*group_name_list: a list with the group/groups that should be tested. 
+```{r}
+createGeneList_per_group <- function(gene_per_group, all_DE_results, group_name_list) {
+  # Extract DEGs for the specified group:
+  group_DEGs <- gene_per_group %>%
+    dplyr::filter(group %in% group_name_list) %>%
+    dplyr::select(gene_id)
+  # Define background data-set with all genes used in the analysis:
+  all_genes <- unique(all_DE_results %>% dplyr::select(gene_id))
+  # Label the background data-set with 1 (DEGs in group) and 0 (DEGs not in group):
+  all_genes$label <- ifelse(all_genes$gene_id %in% group_DEGs$gene_id, 1, 0)
+  # Create a named vector with all genes, labeled as 1 and 0
+  geneList <- all_genes$label
+  names(geneList) <- all_genes$gene_id
+  return(geneList)
+}
+
+```
+
+## Function 4: performs GO enrichment across gene sets:
+
+This function takes a list of queries (sets of genes) and performs 
+GO enichment using topGO library.
+
+Arguments:
+*data_list: a list of data-sets containing the gene_ids of the genes to be tested.
+*topnodes: defines the maximum number of GO terms in the output (arranged by p-value).
+
+```{r}
+performGOEnrichment <- function(data_list, ontology = "BP", topnodes) {
+  # List to store results
+  results_list <- list()
+  
+  # Loop through each dataset in the list
+  for (i in seq_along(data_list)) {
+    # Create a TopGOdata object for each dataset
+    GOdata <- new("topGOdata", 
+                  description = paste("GO analysis BP - Dataset", i),
+                  ontology = ontology,
+                  allGenes = data_list[[i]],
+                  nodeSize = 5,
+                  geneSel = topDiffGenes,
+                  annot = annFUN.org, 
+                  mapping = "org.Dm.eg.db", 
+                  ID = "ensembl")
+    
+    # Run enrichment analysis using the weight01 algorithm and Fisher's exact test
+    result <- runTest(GOdata, algorithm = "weight01", statistic = "Fisher")
+    
+    # Convert the result to a data frame
+    result_df <- GenTable(GOdata, Fisher.weight01 = result,
+                          topNodes = topnodes,
+                          numChar = 1000)
+    result_df$Fisher.weight01 <- as.numeric(result_df$Fisher.weight01)
+    result_df$Dataset <- paste("Dataset", i)
+    
+    # Extract all significant genes for each GO term
+    allGO <- genesInTerm(GOdata)
+    
+    # Filter out significant genes specific to the dataset
+    sample <- data.frame(gene_id = names(data_list[[i]])[data_list[[i]] == 1]) # subsets  significant gene names 
+    sample_annotation <- lapply(allGO, function(x) x[x %in% sample$gene_id]) #  subsets the genes associated with each GO term including only the sample genes.
+    
+    # Include Term description
+    description_df <- data.frame(GO.ID = names(allGO), Term = names(allGO))
+    
+    # Merge the term descriptions with the result data frame
+    result_df <- merge(result_df, description_df, by = "GO.ID", all.x = TRUE)
+    
+    # Add the gene IDs of significant genes to the result data frame
+    result_df$gene_ids <- sapply(result_df$GO.ID, function(go_term) {
+      paste(sample_annotation[[go_term]], collapse = ",")
+    })
+    
+    # Store the result data frame in the results list
+    results_list[[i]] <- result_df
+  }
+  
+  # Return the list of result data frames
+  return(results_list)
+}
+
+
+```
+## Function 5: performs KEGG enrichment across gene sets:
+This function takes a list of queries (sets of genes) and performs 
+Pathway enichment using clusterProfiler library and KEEG database.
+
+Arguments:
+*data_list: a list of data-sets containing the gene_ids of the genes to be tested.
+*background_genes <- a vector of all background gene ids. The background of genes is understood as "all genes that could have been included in the enrichment analysis". In our case, all genes in the genome of Drosophila simulans after filtering by low-expression. 
+```{r}
+
+ # Define the KEGG analysis function
+perform_kegg_analysis <- function(data_list, background_genes, organism = "dme",
+                                  keyType = "kegg",
+                                  pvalueCutoff = 0.05,
+                                  pAdjustMethod = "fdr",
+                                  minGSSize = 10,
+                                  maxGSSize = 500,
+                                  qvalueCutoff = 0.2) {
+  
+  # Initialize a list to store results for each group
+  kegg_results <- list()
+  
+  # Loop through each gene set in the list
+  for (group_name in names(data_list)) {
+    # Get the gene set for the current group
+    test_genes <- query_dataframes[[group_name]]
+    # Perform KEGG enrichment analysis
+    test <- enrichKEGG(
+      gene = test_genes,
+      organism = organism,
+      keyType = keyType,
+      pvalueCutoff = pvalueCutoff,
+      pAdjustMethod = pAdjustMethod,
+      universe = background_genes,
+      minGSSize = minGSSize,
+      maxGSSize = maxGSSize,
+      qvalueCutoff = qvalueCutoff,
+      use_internal_data = FALSE)
+    
+    # Extract and process the results
+    if (nrow(test@result) > 0) {
+      KEGG_results <- test@result
+      KEGG_results$Description <- sub(" -.*", "", KEGG_results$Description)
+      kegg_results[[group_name]] <- KEGG_results
+    } else {
+      kegg_results[[group_name]] <- NULL
+    }
+  }
+  
+  return(kegg_results)
+}
+
+```
+
+### Classify DE results:
+```{r}
+# Classify DE_results:
+DE_results_classified <- left_join(DE_results,
+                                   classify_trajectories,
+                                   by = "gene_id")
+# Remove transitory genes:
+DE_results_classified <- DE_results_classified %>%
+  dplyr::filter(group != "transitory_F7_F31") %>%
+  dplyr::select(gene_id, logFC, padj_fdr, contrast, group)
+
+# Check for NAs:
+sum(is.na(DE_results_classified))
+
+```
+
+### Translate flybase id to KEGG ID:
+This is needed to perform KEEG pathway enrichment. 
+
+We have to translate Flybase IDs into ENTREZ IDs and then into KEGG IDs
+since clusterProfile requires it.
+
+We use annotations_orgDb to translate Flybase IDs into ENTREZ.
+```{r}
+
+# Return the "FLYBASE" IDs for a set of genes
+annotations_orgDb <- AnnotationDbi::select(org.Dm.eg.db, # database
+                                     keys = DE_results_classified$gene_id,  # data to use for retrieval
+                                     columns = c("FLYBASE",
+                                                 "SYMBOL",
+                                                 "ENTREZID",
+                                                 "GENENAME"), # information to retrieve for given data
+                                     keytype = "FLYBASE") # type of data given in 'keys' argument
+
+colnames(annotations_orgDb) <- c("gene_id", "SYMBOL","ENTREZID", "GENENAME")
+
+# Include translated gene ids:  
+DE_results_translated <- cbind(DE_results_classified, annotations_orgDb[,2:4])
+
+# Keep needed columns:
+DE_results_translated <- DE_results_translated %>%
+  dplyr::select(gene_id, ENTREZID, SYMBOL, GENENAME, contrast, group, logFC, padj_fdr)
+
+# How many genes are not translated? 1,068 genes
+sum(is.na(DE_results_translated$ENTREZID))
+
+# Prepare the dataset to translate ENTREZ ID to KEGG ID:
+gene_per_group <- DE_results_translated %>%
+  dplyr::select(c("gene_id","SYMBOL","ENTREZID", "group")) %>% 
+  dplyr::distinct(ENTREZID, .keep_all = TRUE) %>%
+  dplyr::filter(group != "transitory_F7_F31")
+
+# Remove rows with NA:
+gene_per_group <- na.omit(gene_per_group)
+
+# Translate ENTREZ ID to KEGG ID:
+gene_KEGG <- clusterProfiler::bitr_kegg(gene_per_group$ENTREZID,
+                                                  fromType='ncbi-geneid',
+                                                  toType="kegg",
+                                                  organism='dme')
+# Rename columns:
+colnames(gene_KEGG) <- c("ENTREZID", "KEGGID")
+
+dictionary_KEEG_Flybase <- dplyr::left_join(gene_KEGG, gene_per_group, by = "ENTREZID")
+  
+# Introduce group information:
+gene_per_group_KEEG <- left_join(gene_KEGG,
+                                 gene_per_group,
+                                 by = "ENTREZID")
+gene_per_group_KEEG <- gene_per_group_KEEG %>%
+  dplyr::select(c("KEGGID", "group"))
+
+# gene_KEEG should be labeled as gene_id to use createGeneList_per_group function:
+colnames(gene_per_group_KEEG) <- c("gene_id", "group")
+
+```
+### Prepare Gene Lists:
+Needed for GO and Tissue enrichment.
+```{r}
+# Create gene_per_group data-set:
+gene_per_group <- DE_results_translated %>% dplyr::select(c("gene_id", "group")) %>% 
+  dplyr::distinct(gene_id, .keep_all = TRUE) %>% dplyr::filter(group != "transitory_F7_F31")
+
+# Define geneList object for each gene set:
+
+geneList_plateau <- createGeneList_per_group(gene_per_group = gene_per_group,
+                                             all_DE_results = DE_results_translated,
+                                             group_name_list =c("plateau"))
+
+geneList_monotonic <- createGeneList_per_group(gene_per_group = gene_per_group,
+                                               all_DE_results = DE_results_translated,
+                                               group_name_list =c("monotonic"))
+
+geneList_complete_reversed <- createGeneList_per_group(gene_per_group = gene_per_group,
+                                                       all_DE_results = DE_results_translated,
+                                                       group_name_list =c("complete_reversed"))
+
+geneList_incomplete_reversed <- createGeneList_per_group(gene_per_group = gene_per_group,
+                                                         all_DE_results = DE_results_translated,
+                                                         group_name_list =c("incomplete_reversed"))
+
+geneList_late_response <- createGeneList_per_group(gene_per_group = gene_per_group,
+                                                   all_DE_results = DE_results_translated,
+                                                   group_name_list =c("late_response"))
+
+geneList_all_DEGs <- createGeneList_per_group(gene_per_group = gene_per_group,
+                                                   all_DE_results = DE_results_translated,
+                                                   group_name_list = c("plateau","monotonic","complete_reversed","incomplete_reversed","late_response"))
+
+##### Check that geneLists are correct:
+
+#Following the topGO manual, this function is used to determine the alpha value 
+#for DEGs in a data-set containing all possible genes. We want genes == 1 to 
+#be evaluated against the rest of background genes.
+
+topDiffGenes <- function(allScore) { # allScore, internal parameter. 
+  return(allScore == 1)
+}
+x <- topDiffGenes(geneList_all_DEGs)
+sum(x) # 6,324 genes, correct!
+#####
+
+# Merge all genelists:
+data_list <- list(plateau = geneList_plateau, 
+                  monotonic = geneList_monotonic,
+                  complete_reversed = geneList_complete_reversed,
+                  incomplete_reversed = geneList_incomplete_reversed,
+                  late_response = geneList_late_response,
+                  all_DEGs = geneList_all_DEGs)
+
+```
+### Prepare flyatlas2 for tissue enrichment: 
+Here we are using male tissues from flyAtlas2 to compute log2FC between 
+male tissue and the whole body expression.
+```{r}
+# Define tissue column names: 
+numeric_columns_adult_male <- c("Carcass M", "Head M", "Eye M",  "Brain M",
+                                "Ganglion M", "Crop M",  "Midgut M", "Hindgut M",
+                                "Tubule M", "RectalPad M", "Fat Body M",
+                                "Heart M", "Salivary M", "Testis",
+                                "Accessory Gland")
+
+
+# Compute log2FC for male tissues:
+for (col_name in numeric_columns_adult_male) {
+  new_col_name <- paste0(col_name, "_log2FC")  # Create the new column name
+  fly_atlas2_FPKM[new_col_name] <- log2(fly_atlas2_FPKM[col_name] / fly_atlas2_FPKM["Whole M"])
+
+}
+
+# Change column name:
+fly_atlas2_FPKM <- fly_atlas2_FPKM %>% dplyr::rename(FB = FBgn)
+
+fly_atlas2_male_logFC <- fly_atlas2_FPKM
+
+```
+# # Part 1:  GO Enrichment - transcriptomic groups
+## Perform GO enrichment across groups:
+```{r}
+#### Biological Process ####
+
+# Run function performGOEnrichment on data_list:
+GO_BP <- performGOEnrichment(data_list, ontology = "BP", topnodes = 50)
+
+# Create a dataframe with results:
+GO_BP_df <- rbind(GO_BP[[1]], GO_BP[[2]], GO_BP[[3]],
+                  GO_BP[[4]], GO_BP[[5]], GO_BP[[6]])
+
+# Rename group names:
+GO_BP_df <- GO_BP_df %>% 
+  mutate(group = case_when(Dataset == "Dataset 1" ~ "plateau", 
+                           Dataset == "Dataset 2" ~ "monotonic",
+                           Dataset == "Dataset 3" ~ "complete_reversed",
+                           Dataset == "Dataset 4" ~ "incomplete_reversed",
+                           Dataset == "Dataset 5" ~ "late_response",
+                           Dataset == "Dataset 6" ~ "all_DEGs"))
+# Rename columns:
+colnames(GO_BP_df) <- c("GO.ID", "Term", "Annotated", "Significant", "Expected",
+                        "Fisher_weight01", "Dataset", "Term2", "significant_gene_ids", "group")
+
+# Remove not needed columns:
+GO_BP_df <- GO_BP_df %>% dplyr::select(-Dataset) %>% dplyr::select(-Term2)
+
+#### Molecular Function ####
+
+# Run function performGOEnrichment on data_list:
+GO_MF <- performGOEnrichment(data_list, ontology = "MF", topnodes = 50)
+
+# Create a dataframe with results:
+GO_MF_df <- rbind(GO_MF[[1]], GO_MF[[2]], GO_MF[[3]],
+                  GO_MF[[4]], GO_MF[[5]], GO_MF[[6]])
+
+# Rename group names:
+GO_MF_df <- GO_MF_df %>% 
+  mutate(group = case_when(Dataset == "Dataset 1" ~ "plateau", 
+                           Dataset == "Dataset 2" ~ "monotonic",
+                           Dataset == "Dataset 3" ~ "complete_reversed",
+                           Dataset == "Dataset 4" ~ "incomplete_reversed",
+                           Dataset == "Dataset 5" ~ "late_response",
+                           Dataset == "Dataset 6" ~ "all_DEGs"))
+# Rename columns:
+colnames(GO_MF_df) <- c("GO.ID", "Term", "Annotated", "Significant", "Expected",
+                        "Fisher_weight01", "Dataset", "Term2", "significant_gene_ids", "group")
+
+# Remove not needed columns:
+GO_MF_df <- GO_MF_df %>% dplyr::select(-Dataset) %>% dplyr::select(-Term2)
+
+#### Celular Compartment ####
+
+# Run function performGOEnrichment on data_list:
+GO_CC <- performGOEnrichment(data_list, ontology = "CC", topnodes = 10)
+
+# Create a dataframe with results:
+GO_CC_df <- rbind(GO_CC[[1]], GO_CC[[2]], GO_CC[[3]],
+                  GO_CC[[4]], GO_CC[[5]], GO_CC[[6]])
+
+# Rename group names:
+GO_CC_df <- GO_CC_df %>% 
+  mutate(group = case_when(Dataset == "Dataset 1" ~ "plateau", 
+                           Dataset == "Dataset 2" ~ "monotonic",
+                           Dataset == "Dataset 3" ~ "complete_reversed",
+                           Dataset == "Dataset 4" ~ "incomplete_reversed",
+                           Dataset == "Dataset 5" ~ "late_response",
+                           Dataset == "Dataset 6" ~ "all_DEGs"))
+# Rename columns:
+colnames(GO_CC_df) <- c("GO.ID", "Term", "Annotated", "Significant", "Expected",
+                        "Fisher_weight01", "Dataset", "Term2", "significant_gene_ids", "group")
+
+# Remove not needed columns:
+GO_CC_df <- GO_CC_df %>% dplyr::select(-Dataset) %>% dplyr::select(-Term2)
+
+```
+
+## Export GO enrichment results:
+Export only significant GO Terms.
+```{r}
+# Arrange GO terms by p-value and group:
+export_df <- GO_BP_df[with(GO_BP_df, order(group, Fisher_weight01)),]
+# Filter significant GO terms:
+export_df <- export_df %>% dplyr::filter(Fisher_weight01 < 0.05)
+
+# Export file:
+#write_xlsx(export_df, path = "output_files/GO_enrichment_results_2.xlsx")
+
+# Arrange GO terms by p-value and group:
+export_df <- GO_MF_df[with(GO_MF_df, order(group, Fisher_weight01)),]
+# Filter significant GO terms:
+export_df <- export_df %>% dplyr::filter(Fisher_weight01 < 0.05)
+
+# Export file:
+write_xlsx(export_df, path = "output_files/GO_enrichment_results_MP.xlsx")
+
+export_df <- GO_CC_df[with(GO_CC_df, order(group, Fisher_weight01)),]
+# Filter significant GO terms:
+export_df <- export_df %>% dplyr::filter(Fisher_weight01 < 0.05)
+
+# Export file:
+# write_xlsx(export_df, path = "output_files/GO_enrichment_results_BP.xlsx")
+
+
+```
+
+## Plot GO enrichment results:
+```{r}
+# List group names:
+group_names <- unique(GO_BP_df$group)
+
+## Plot GO Terms arranged by p-values: threshold at alpha < 0.01
+
+plot1 <- GO_BP_df %>% filter(Fisher_weight01 < 0.01) %>%
+  ggplot(aes(x = reorder(Term, -Fisher_weight01),
+             y = Fisher_weight01)) + 
+  geom_bar(stat = 'identity', fill = "lightyellow", color = "black") +
+  coord_flip() +
+  labs(y = "q-value",
+       x = "GO terms") +
+  facet_wrap(~ group, 
+             nrow = 6,
+             scales = "free" ) +
+  theme_light() +
+  theme(legend.position = "none",
+        strip.background = element_blank(),
+        strip.text.x = element_text(colour = "black",
+                                    face = "bold")) + ggtitle("GO terms ordered by q-value",
+                                                              subtitle = "GO terms qvalue < 0.01")
+
+## Plot GO Terms arranged by number of significant genes: threshold at alpha < 0.01
+
+plot2 <- GO_BP_df %>% filter(Fisher_weight01 < 0.01) %>%
+  ggplot(aes(x = reorder(Term, Significant),
+             y = Significant)) + 
+  geom_bar(stat = 'identity', fill = "lightblue", color = "black") +
+  coord_flip() +
+  labs(y = "Genes",
+       x = "GO terms") +
+  facet_wrap(~ group, 
+             nrow = 6,
+             scales = "free" ) +
+  theme_light() +
+  theme(legend.position = "none",
+        strip.background = element_blank(),
+        strip.text.x = element_text(colour = "black",
+                                    face = "bold")) + ggtitle("GO terms ordered by number of genes",
+                                                              subtitle = "GO terms qvalue < 0.01")
+
+plot1
+plot2
+combined_plot <- plot1 + plot2
+# Export the plot
+#ggsave("output_files/plots/GO_enrichment_BP.svg", combined_plot, width = 15, height = 10)
+
+```
+
+```{r}
+# Plotting all groups
+
+# List to store the plots:
+
+plots <- list()
+
+for (i in group_names) {
+  group_df <- GO_BP_df[GO_BP_df$group == i, ] %>% dplyr::filter(Fisher_weight01 < 0.05)
+
+  plot <- ggplot(group_df, aes(x = reorder(Term, Fisher_weight01), y = Fisher_weight01)) +
+  geom_bar(stat = "identity",
+           position = "dodge",
+           fill = "lightyellow",
+           color = "black") +
+  coord_flip() +
+  labs(x = "GO Term", y = "p-value") +
+  theme_minimal() +
+  theme(legend.position = "top", legend.title = element_blank()) + 
+  facet_wrap(~ group, scales = "free_y", ncol = 1) +
+  theme(
+      legend.position = "top",
+      legend.title = element_blank(),
+      axis.text.y = element_text(size = 10, hjust = 1)) +
+    theme_classic()
+
+ plots[[i]] <- plot
+}
+
+plots
+
+## Plot GO Terms arranged by number of genes:
+
+plots <- list()
+
+for (i in group_names) {
+  group_df <- GO_BP_df[GO_BP_df$group == i, ] %>% dplyr::filter(Fisher_weight01 < 0.05)
+
+  plot <- ggplot(group_df, aes(x = reorder(Term, Significant), y = Significant)) +
+  geom_bar(stat = "identity",
+           position = "dodge",
+           fill = "lightblue",
+           color = "black") +
+  coord_flip() +
+  labs(x = "GO Term", y = "Genes") +
+  theme_minimal() +
+  theme(legend.position = "top",
+        legend.title = element_blank()) + 
+  facet_wrap(~ group, 
+             scales = "free_y",
+             ncol = 1) +
+  theme(legend.position = "top",
+      legend.title = element_blank(),
+      axis.text.y = element_text(size = 3, hjust = 1)) +
+    theme_classic()
+
+ plots[[i]] <- plot
+ 
+}
+
+plots
+
+```
+
+#### Fig. S5: Summary plot of GO terms - by p-value
+Plot the names of the 10 first go terms with p-values:
+```{r}
+plot_df <- GO_BP_df #%>% dplyr::filter(group != "all_DEGs")
+
+plot_df$group <- factor(plot_df$group, levels = c("all_DEGs", "plateau",
+                                                  "monotonic", "late_response",
+                                                  "incomplete_reversed",
+                                                  "complete_reversed"))
+
+manual_palette <- c("grey",
+                    color_plateau,
+                    color_monotonic,
+                    color_late_response,
+  color_incomplete_reversed,
+  color_complete_reversed)              
+
+plot <- plot_df %>% ggplot(aes(x = -log10(Fisher_weight01),
+                       y = reorder(Term,
+                                   -log10(Fisher_weight01)),
+                       fill = group)) +
+  geom_bar(stat = "identity", position = "dodge" ) +
+  theme_minimal() +
+  labs(title = "",
+       y = "GO Term") +
+  xlab(bquote(-log[10]~p-value)) +
+  theme_classic() +
+  scale_fill_manual(values = manual_palette, labels = c("all DEGs", "Plateau",
+                                                  "Monotonic", "Late-response",
+                                                  "Incomplete-reverse",
+                                                  "Complete-reverse")) +
+  theme(
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size =16),
+    axis.title.x = element_text(margin = margin(t = 10)),
+    axis.title.y = element_text(margin = margin(r = 10)),
+    plot.title = element_text(hjust = 0.5, size = 18, face = "bold"),
+    legend.position = "bottom", 
+    strip.text  = element_blank()) +
+  facet_wrap(~group, scales = "free_y",
+             ncol=1)
+
+plot
+
+#Export the plot:
+#ggsave("output_files/plots/GO_terms_10_top_pvalue.svg", width = 200, height = 200, units="mm", plot)
+
+
+```
+
+#### Summary plot of GO terms - by number of genes
+Plot the names of the 5 first go terms with p-values:
+```{r}
+plot_df <- GO_BP_df %>% dplyr::filter(group != "all_DEGs")
+
+
+manual_palette <- c(color_incomplete_reversed,
+                    color_complete_reversed,
+                    color_late_response,
+                    color_monotonic,
+                    color_plateau)
+
+plot <- plot_df %>% ggplot(aes(y = Significant,
+                       x = reorder(Term,
+                                   Significant, decreasing = TRUE),
+                       fill = group)) +
+  geom_bar(stat = "identity", position = "dodge" ) +
+  theme_minimal() +
+  labs(title = "",
+       x = "Gene symbol",
+       y = "N. of genes") + 
+  theme_classic() +
+  scale_fill_manual(values = manual_palette) +
+  theme(
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+    axis.title.x = element_text(margin = margin(t = 10)),
+    axis.title.y = element_text(margin = margin(r = 10)),
+    plot.title = element_text(hjust = 0.5, size = 18, face = "bold"),
+    legend.position = "bottom", 
+    strip.text = element_blank()) +
+  facet_wrap(~group, scales = "free_x",
+             ncol=6)
+
+plot
+
+#Export the plot:
+#ggsave("output_files/plots/GO_terms_10_top_nbgenes.svg", plot)
+
+```
+
+# # Part 2: Tissue Enrichment - transcriptomic groups
+# Prepare queries:
+The queries contain only the genes that have to be tested. 
+The background genes must be in a separate list.
+```{r}
+# Function to filter genes labeled as 1 (DEGs)
+filter_genes <- function(gene_vector) {
+  gene_vector[gene_vector == 1]
+}
+
+## Create query list containing all gene-sets as data-frames:
+# Apply the function to each vector:
+filtered_gene_lists <- lapply(data_list, filter_genes)
+
+# Keep only the gene_ids and remove the labels.
+query_dataframes <- lapply(filtered_gene_lists, names)
+# Convert each vector within query_dataframes into a dataframe with a column containing the gene_ids of each group)
+query_dataframes <- lapply(query_dataframes, function(vec) data.frame(group = vec))
+# New group names corresponding to each data frame
+new_group_names <- c("plateau","evolving_monotonic","completeted_reversed", "incompleted_reversed", "late_response", "all_DEGs")
+
+# Manually change the name of the "group" column in each data frame
+query_dataframes <- lapply(seq_along(query_dataframes), function(i) {
+  df <- query_dataframes[[i]]
+  names(df)[names(df) == "group"] <- new_group_names[i]
+  return(df)
+})
+
+## Create  Background set as a vector of all gene ids:
+background <- gene_per_group$gene_id
+
+```
+
+## Perform Tissue enrichment:
+```{r}
+# List to store the results for each query:
+res_tiss_enrich_list <- list()
+
+# Loop to run perform_enrichment_analysis on the query_df:
+for (i in seq_along(query_dataframes)) {
+  query_df <- query_dataframes[[i]]
+  # Get the name of the query data-frame:
+  query_name <- deparse(substitute(query_df))
+  # Run perform_enrichment_analysis function:
+  result <- perform_enrichment_analysis(list(query_df), background, fly_atlas2_male_logFC)
+  # Set the group name to the query data-frame name:
+  result$group <- colnames(query_dataframes[[i]])  
+  res_tiss_enrich_list[[i]] <- result
+}
+
+# Combine results into a single data-frame
+res_tiss_enrich <- do.call(rbind, res_tiss_enrich_list)
+
+```
+## Export tissue enrichment results:
+```{r}
+export_df <- res_tiss_enrich
+
+# Export file:
+#write_xlsx(export_df, path = "output_files/tissue_enrichment_results.xlsx")
+
+```
+## Fig S7 - Plot Tissue enrichment:
+```{r}
+# Subset data-set:
+list_datasets <- list(res_tiss_enrich)
+
+# Heatmap p-values:
+custom_palette <- scale_fill_gradientn(
+  colors = c("red", "orange", "lightyellow","grey"),
+  limits = c(0, 0.049))
+
+for (i in seq(1:length(list_datasets))) {
+  a <- ggplot(list_datasets[[i]],
+              aes(x = tissue,
+                  y = group,
+                  fill= padj)) + 
+    geom_tile() + 
+    theme_minimal() + 
+    custom_palette + 
+    theme(axis.text.x = element_text(angle = 90,
+                                     vjust = 0.5,
+                                     hjust = 1,
+                                     color = "black", size=15),
+          axis.text.y = element_text(color = "black", size=15),
+          plot.background = element_rect(fill="white"), 
+      strip.background = element_blank(),
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      axis.ticks = element_line(colour = "black"))  
+}
+
+a <- a + scale_y_discrete(labels = c("All DEGs","Complete-reverse","Monotonic",
+                                     "Incomplete-reverse","Late-response","Plateau")) + 
+  scale_x_discrete(labels = c("Accesory Gland","Brain","Carcass",
+                              "Crop","Eye","Fat Body","Ganglion",
+                              "Head", "Heart", "Hindgut","Midgut",
+                              "Rectal Pad", "Salivary", "Testis", "Tubule")) +
+  ylab("") +
+  xlab("Tissue")
+a
+
+# Export file:
+#ggsave("output_files/plots/Enrichment/tissue_enrichment.svg",  width = 300, height = 200, units= "mm", a)
+
+```
+# # Part 3: KEGG pathway Enrichment - transcriptomic groups
+### Prepare Gene Lists:
+Here we use ENTREZ IDs instead of flybase ids.
+```{r}
+
+# Define geneList object for each gene set:
+
+geneList_plateau <- createGeneList_per_group(gene_per_group = gene_per_group_KEEG,
+                                             all_DE_results = gene_per_group_KEEG,
+                                             group_name_list =c("plateau"))
+
+geneList_monotonic <- createGeneList_per_group(gene_per_group = gene_per_group_KEEG,
+                                               all_DE_results = gene_per_group_KEEG,
+                                               group_name_list =c("monotonic"))
+
+geneList_complete_reversed <- createGeneList_per_group(gene_per_group = gene_per_group_KEEG,
+                                                       all_DE_results = gene_per_group_KEEG,
+                                                       group_name_list =c("complete_reversed"))
+
+geneList_incomplete_reversed <- createGeneList_per_group(gene_per_group = gene_per_group_KEEG,
+                                                         all_DE_results = gene_per_group_KEEG,
+                                                         group_name_list =c("incomplete_reversed"))
+
+geneList_late_response <- createGeneList_per_group(gene_per_group = gene_per_group_KEEG,
+                                                   all_DE_results = gene_per_group_KEEG,
+                                                   group_name_list =c("late_response"))
+
+geneList_all_DEGs <- createGeneList_per_group(gene_per_group = gene_per_group_KEEG,
+                                                   all_DE_results = gene_per_group_KEEG,
+                                                   group_name_list = c("plateau","monotonic",
+                                                                       "complete_reversed",
+                                                                       "incomplete_reversed","late_response"))
+
+##### Check that geneLists are correct:
+
+#Following the topGO manual, this function is used to determine the alpha value 
+#for DEGs in a data-set containing all possible genes. We want genes == 1 to 
+#be evaluated against the rest of background genes.
+
+topDiffGenes <- function(allScore) { # allScore, internal parameter. 
+  return(allScore == 1)
+}
+x <- topDiffGenes(geneList_all_DEGs)
+sum(x) 
+
+#####
+
+# Merge all genelists:
+data_list <- list(plateau = geneList_plateau, 
+                  monotonic = geneList_monotonic,
+                  complete_reversed = geneList_complete_reversed,
+                  incomplete_reversed = geneList_incomplete_reversed,
+                  late_response = geneList_late_response,
+                  all_DEGs = geneList_all_DEGs)
+
+## Create final gene lists:
+# Function to filter genes labeled as 1 (DEGs)
+filter_genes <- function(gene_vector) {
+  gene_vector[gene_vector == 1]
+}
+
+## Create query list containing all gene-sets as data-frames:
+# Apply the function to each vector:
+filtered_gene_lists <- lapply(data_list, filter_genes)
+
+# Keep only the gene_ids and remove the labels.
+query_dataframes <- lapply(filtered_gene_lists, names)
+
+## Create  Background set as a vector of all gene ids:
+background <- gene_per_group_KEEG$gene_id
+
+```
+## Perform KEGG enrichment:
+```{r}
+res_KEGG_enrich <- perform_kegg_analysis(data_list = query_dataframes,
+                                         background_genes = background)
+
+# Combine results into a single data-frame
+res_KEGG_enrich_df <- bind_rows(res_KEGG_enrich, .id = "group") %>%
+      mutate(group = as.character(group))
+
+```
+## Export KEGG enrichment results:
+```{r}
+# Filter significant KEGG pathways:
+export_df <- res_KEGG_enrich_df %>% dplyr::filter(qvalue < 0.05)
+
+# Export file:
+#write_xlsx(export_df, path = "output_files/KEGG_enrichment_results.xlsx")
+
+```
+## Plot KEGG enrichment results
+```{r}
+## Visualize significant pathways according to categories:
+
+plot1 <- res_KEGG_enrich_df %>% filter(qvalue < 0.05) %>%
+  ggplot(aes(x = reorder(category, p.adjust),
+             y = Count, fill = qvalue)) + 
+  geom_bar(stat = 'identity') +
+  coord_flip() +
+  labs(x = "KEGG Pathways (category)",
+       y = "", 
+       fill = "q-value") + 
+  scale_fill_gradient(limits = c(0, 0.06),
+                      breaks = c(0, 0.06),
+                      low = "red", high = "grey") +
+  facet_wrap(~ group, nrow = 1) +
+  theme_light() +
+  theme(legend.position = "none",
+        strip.background = element_blank(),
+        strip.text.x = element_text(colour = "black", face = "bold"),
+                  panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank())
+plot1
+## Visualize significant pathways according to sub-categories:
+
+plot2 <- res_KEGG_enrich_df %>% filter(qvalue < 0.05) %>%
+  ggplot(aes(x = reorder(subcategory, p.adjust),
+             y = Count, fill = qvalue)) + 
+  geom_bar(stat = 'identity') +
+  coord_flip() +
+  labs(x = "KEGG Pathways (subcategory)",
+       y = "", 
+       fill = "q-value") + 
+  scale_fill_gradient(limits = c(0, 0.06),
+                      breaks = c(0, 0.06),
+                      low = "red", high = "grey") +
+  facet_wrap(~ group, nrow = 1) +
+  theme_light() +
+  theme(legend.position = "none",
+                        strip.background = element_blank(),
+                        strip.text.x = element_blank(),
+                  panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank())
+plot2
+```
+
+## Fig S6 - Plot KEGG enrichment results
+```{r}
+## Visualize significant pathways according description:
+
+#labeller = labeller(group = c("all_DEGs" = "all DEGs",
+      #"complete_reversed" = "Complete-reverse",
+      #"incomplete_reversed" = "Incomplete-reverse",
+      #"monotonic" = "Monotonic",
+      #"plateau" = "Plateau"))
+
+plot_df <- res_KEGG_enrich_df %>% dplyr::filter(qvalue < 0.05)
+plot3 <-  plot_df %>% ggplot(aes(x = Description, 
+             y = Count, fill = qvalue)) + 
+  geom_bar(stat = 'identity') +
+  coord_flip() +
+  labs(x = "KEGG Pathways",
+       y = "Genes", 
+       fill = "p-value") + 
+  scale_fill_gradient(limits = c(0, 0.09),
+                      breaks = c(0, 0.09),
+                      low = "red", high = "grey") +
+  facet_wrap(~ group, 
+      nrow = 1) +
+  theme_linedraw() +
+theme(legend.position = "bottom",
+      strip.background = element_blank(),
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      axis.ticks = element_line(colour = "black"),
+      axis.text.y = element_text(color = "black", size=14),
+      axis.text.x = element_text(color = "black", size=14),
+      strip.text.x = element_text(colour = "black",
+                                  face = "bold", size=14)) + ylab("")
+
+plot3
+
+# Export the plot:
+#ggsave("output_files/plots/Enrichment/KEGG_enrichment.svg", width = 350, height = 200, units = "mm", plot3)
+
+```
+# # Part 4: Investigate monotonic genes related to lipid metabolism:
+# Import list of genes asssociated to GO terms:
+```{r}
+GO_list_check <- read_xlsx(path ="input_files/monotonic_genes_GOterms_lipid.xlsx")
+GO_list_check
+
+```
+
+# Classify lipid genes:
+```{r}
+# Subset lipid genes:
+classify_trajectories_large_subset <- classify_trajectories %>% dplyr::filter(gene_id %in% GO_list_check$gene_id)
+# Add GO term information:
+join_df <- dplyr::left_join(GO_list_check, classify_trajectories_large_subset, by = "gene_id")
+join_df
+
+```
+# Plot log2FC:
+```{r}
+ggplot(join_df, aes(x = gene_symbol, y = logFC_F7, fill = GO_description)) +
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  labs(title = "Monotonic genes - lipid metabolism",
+       x = "Gene symbol",
+       y = "Log2 Fold Change (F7)") + 
+  theme_classic() +
+  theme(
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+    axis.title.x = element_text(margin = margin(t = 10)),
+    axis.title.y = element_text(margin = margin(r = 10)),
+    plot.title = element_text(hjust = 0.5, size = 18, face = "bold"),
+    legend.position = "none",  
+    strip.text = element_text(size = 12)) +
+  scale_fill_viridis(discrete = TRUE) +
+  facet_wrap(~GO_description, scales = "free_x",
+             nrow = 1,
+             labeller = label_wrap_gen(width = 15)) 
+
+##
+
+ggplot(join_df, aes(x = gene_symbol, y = logFC_F31, fill = GO_description)) +
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  labs(title = "Monotonic genes - lipid metabolism",
+       x = "Gene symbol",
+       y = "Log2 Fold Change (F31)") + 
+  theme_classic() +
+  theme(
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+    axis.title.x = element_text(margin = margin(t = 10)),
+    axis.title.y = element_text(margin = margin(r = 10)),
+    plot.title = element_text(hjust = 0.5, size = 18, face = "bold"),
+    legend.position = "none",  
+    strip.text = element_text(size = 12)) +
+  scale_fill_viridis(discrete = TRUE) +
+  facet_wrap(~GO_description, scales = "free_x",
+             nrow = 1,
+             labeller = label_wrap_gen(width = 15)) 
+
+```
+
+```{r}
+# Reshape the data to have one column for the logFC values and another for the condition (F7 or F31)
+join_df_long <- join_df %>%
+  pivot_longer(cols = starts_with("logFC"), 
+               names_to = "generation", 
+               values_to = "logFC") 
+# Remove logFC_F7_F31:
+join_df_long <- join_df_long %>% dplyr::filter(generation != "logFC_F7_F31")
+# Relevel generation:
+join_df_long$generation <- factor(join_df_long$generation, levels = c("logFC_F7", "logFC_F31"))
+# Relevel GO_description:
+join_df_long$GO_description <- factor(join_df_long$GO_description, levels = c("fatty acid catabolic process",
+                                                                              "lipid catabolic process",
+                                                                              "fatty acid beta-oxidation using acyl-CoA oxidase",
+                                                                              "medium-chain fatty acid metabolic process",
+                                                                              "lipid droplet formation", 
+                                                                              "unsaturated fatty acid biosynthetic process",
+                                                                              "glycosphingolipid biosynthetic process"))
+
+# Plot the data
+ggplot(join_df_long, aes(x = gene_symbol, y = logFC, fill = generation)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  theme_minimal(base_size = 15) +
+  labs(
+    title = "Monotonic genes - lipid metabolism",
+    x = "gene symbol",
+    y = "Log2 Fold Change") + theme_classic() +
+  theme(
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+    axis.title.x = element_text(margin = margin(t = 10)),
+    axis.title.y = element_text(margin = margin(r = 10)),
+    plot.title = element_text(hjust = 0.5, size = 18, face = "bold"),
+    legend.position = "bottom",
+    strip.text = element_text(size = 12)) +
+  scale_fill_manual(values = c("#af8dc3","#762a83"),
+                    labels = c("logFC_F7" = "gen7" ,
+                               "logFC_F31" = "gen31")) +
+  facet_wrap(~GO_description, scales = "free_x",
+             nrow = 1,
+             labeller = label_wrap_gen(width = 20)) 
+
+```
+# # Part 5: Investigate monotonic genes related to lipid metabolism:
+# List of genes asssociated to KEGG terms:
+```{r}
+
+mitophagy_KEGG <- data.frame(KEGGID = c("Dmel_CG10523","Dmel_CG1134","Dmel_CG1167","Dmel_CG12157","Dmel_CG12334","Dmel_CG13030","Dmel_CG14980","Dmel_CG15081","Dmel_CG15224","Dmel_CG15874","Dmel_CG2087","Dmel_CG2275","Dmel_CG2615","Dmel_CG2960","Dmel_CG3016","Dmel_CG3143","Dmel_CG3615","Dmel_CG3664","Dmel_CG3869","Dmel_CG4943","Dmel_CG5059","Dmel_CG5271","Dmel_CG5482","Dmel_CG5659","Dmel_CG5662","Dmel_CG5676","Dmel_CG5680","Dmel_CG5915","Dmel_CG7654","Dmel_CG8004","Dmel_CG8184","Dmel_CG8226","Dmel_CG8479","Dmel_CG8914","Dmel_CG9139","Dmel_CG9375","Dmel_CG9393","Dmel_CG9946","Dmel_CG9949"))
+mitophagy_flybase <- dplyr::left_join(mitophagy_KEGG, dictionary_KEEG_Flybase, by = "KEGGID")
+
+oxidative_phosphorilation_KEGG <- data.frame(KEGGID=c("Dmel_CG10219","Dmel_CG10664","Dmel_CG12403","Dmel_CG14724","Dmel_CG14909","Dmel_CG15719","Dmel_CG6020","Dmel_CG6030","Dmel_CG6463","Dmel_CG6666","Dmel_CG7181","Dmel_CG7211","Dmel_CG7610","Dmel_CG7625","Dmel_CG7678","Dmel_CG8189","Dmel_CG9032","Dmel_CG9160","Dmel_CG9762"))
+oxidative_phosphorilation_flybase <- dplyr::left_join(oxidative_phosphorilation_KEGG, dictionary_KEEG_Flybase, by = "KEGGID")
+
+circadian_rythm_KEGG <- data.frame(KEGGID = c("Dmel_CG14029","Dmel_CG17100","Dmel_CG17888","Dmel_CG3234","Dmel_CG7391"))
+circadian_rythm_flybase <- dplyr::left_join(circadian_rythm_KEGG, dictionary_KEEG_Flybase, by = "KEGGID")
+
+carbon_metabolism_KEGG <- data.frame(KEGGID = c("Dmel_CG10622","Dmel_CG10748","Dmel_CG12055","Dmel_CG12233","Dmel_CG15093","Dmel_CG1516","Dmel_CG1721","Dmel_CG17896","Dmel_CG18003","Dmel_CG31692","Dmel_CG4586","Dmel_CG5044","Dmel_CG6415","Dmel_CG6543","Dmel_CG6871","Dmel_CG7176","Dmel_CG7362","Dmel_CG9390","Dmel_CG9709"))
+carbon_metabolism_flybase <- dplyr::left_join(carbon_metabolism_KEGG, dictionary_KEEG_Flybase, by = "KEGGID")
+
+xenobiotics_KEGG <- data.frame(KEGGID = c("Dmel_CG1681","Dmel_CG17224","Dmel_CG17524","Dmel_CG17533","Dmel_CG17932","Dmel_CG18548","Dmel_CG3027","Dmel_CG4688","Dmel_CG5724","Dmel_CG8353"))
+xenobiotics_flybase <- dplyr::left_join(xenobiotics_KEGG, dictionary_KEEG_Flybase, by = "KEGGID")
+xenobiotics_flybase <- dplyr::left_join(xenobiotics_flybase, classify_trajectories, by = "gene_id")
+
+```
+
+# Plot log2FC:
+```{r}
+xenobiotics_flybase <- xenobiotics_flybase %>% dplyr::select(c("KEGGID","ENTREZID", "gene_id","SYMBOL","group.x",      "logFC_F7","logFC_F31","padj_F7","padj_F31","direction","full_group"))
+
+xenobiotics_flybase <- pivot_longer(xenobiotics_flybase, 
+                        cols = c(logFC_F7, logFC_F31, 
+                                 padj_F7, padj_F31), 
+                        names_to = c(".value", "generation"), 
+                        names_pattern = "(logFC|padj)_(F7|F31)")
+
+
+plot <- ggplot(xenobiotics_flybase, aes(x = SYMBOL, y = logFC, fill = generation)) +
+  geom_bar(stat = "identity", position = "dodge" ) +
+  theme_minimal() +
+  labs(title = "Monotonic genes", subtitle = "Xenobiotics biodegradation and metabolism",
+       x = "Gene symbol",
+       y = "Log2 Fold Change") + 
+  theme_classic() +
+  scale_fill_manual(values = c("#af8dc3", "#762a83"), labels = c("7", "31")) +
+  theme(
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+    axis.title.x = element_text(margin = margin(t = 10)),
+    axis.title.y = element_text(margin = margin(r = 10)),
+    plot.title = element_text(hjust = 0.5, size = 18, face = "bold"),
+    legend.position = "bottom", 
+    strip.text = element_text(size = 12)) 
+
+plot
+
+#ggsave( "output_files/plots/monotonic_KEGG_Xenobiotics.png", plot)
+
+
+```
+
+FLYBASE INFORMATION:
+
+Only 1 gene with enough information to link them with lipid metabolism:
+
+FBgn0033817 (GstE14)	Glutathione S transferase E14 (GstE14) encodes an essential protein for ecdysone biosynthesis. It is thought to play a crucial role in regulating cholesterol intake and/or transport in the steroidogenic cells. 
+
+
+--- END ---

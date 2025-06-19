@@ -1,0 +1,1304 @@
+---
+title: "High-Protein BigCages - Transcriptomic parallelism"
+Author: "Claudia Ramirez-lanzas"
+Date: "27/05/2024"
+---
+
+# Load libraries:
+```{r}
+# Data handling:
+library("writexl") 
+library("tidyverse") 
+
+# Plotting:
+library("ggplot2") 
+library("svglite") 
+library("UpSetR") # UpSet plots
+library("patchwork") 
+library("khroma") # plotting colour blind safe
+library("ggpubr") 
+library("rstatix")
+library("ggsignif")
+
+
+
+```
+
+# Check sessionInfo:
+```{r}
+sessionInfo()
+```
+# Set-up colors:
+```{r}
+bright <- color("bright")
+plot_scheme(bright(6), colours = TRUE, names = TRUE, size = 0.9)
+#
+muted <- color("muted")
+plot_scheme(muted(9), colours = TRUE, names = TRUE, size = 0.9)
+
+color_plateau <- muted(9)[2] #"#332288"
+color_monotonic <- muted(9)[7] #"#44AA99"
+color_late_response <-  muted(9)[3] #"#DDCC77"
+color_incomplete_reversed <- muted(9)[9] #"#AA4499"
+color_complete_reversed <- muted(9)[5] #"#88CCEE" 
+color_shared <- muted(9)[1] #"#CC6677" 
+
+plot_scheme(muted(9)[2], colours = TRUE, names = TRUE, size = 0.9)
+plot_scheme(muted(9)[7], colours = TRUE, names = TRUE, size = 0.9)
+plot_scheme(muted(9)[9], colours = TRUE, names = TRUE, size = 0.9)
+plot_scheme(muted(9)[3], colours = TRUE, names = TRUE, size = 0.9)
+plot_scheme(muted(9)[5], colours = TRUE, names = TRUE, size = 0.9)
+plot_scheme(muted(9)[1], colours = TRUE, names = TRUE, size = 0.9)
+```
+# Import files:
+```{r}
+classify_trajectories <- read_csv("input_files/classify_trajectories_df.csv", show_col_types = FALSE)
+
+DE_rep_specific_results <- read_csv("input_files/DE_repwise_results.csv", show_col_types = FALSE)
+DE_rep_specific_results <- DE_rep_specific_results %>% dplyr::filter(generation != "transitory_F7_F31") 
+
+```
+
+*classify_trajectories: contains all genes classified by transcriptomic
+trajectory along with the results of DE analysis. This dataset was generated in
+08_Transcriptomic_trajectories notebook.
+
+*DE_rep_specific_results: contains the results of replicate wise DE analysis. 
+P-values are corrected across all contrasts.
+
+# Function 1: Compute Jaccard Index per group
+This function uses replicate wise DE results to compute Jaccard Index in >= 1 groups.
+Arguments:
+
+* df: a data-set containing at least 3 columns:
+1) the gene_id of the DEGs (only include DEGs, non-significant genes should be
+excluded here), 2)
+the replicate id, 3)
+the group id (e.g., the transcriptomic group, the generation etc)
+
+* group: the column name for the grouping variable 
+```{r}
+compute_jaccard_index_per_group <- function(df, group ) {
+  # Summarize gene IDs per contrast
+  gene_ids_per_contrast <- df %>%
+    group_by(group, contrast) %>%
+    summarise(gene_ids = list(gene_id), .groups = 'drop')
+  
+  # Create an empty data-frame to store the results:
+  results <- data.frame(
+    group = integer(),
+    contrast1 = character(),
+    contrast2 = character(),
+    Jaccard_Index = numeric(),
+    stringsAsFactors = FALSE)
+  
+  # Generate pairwise comparisons:
+  unique_contrasts <- unique(gene_ids_per_contrast$contrast)
+  pairwise_comparisons <- combn(unique_contrasts, 2, simplify = FALSE)
+  
+  # Create a data frame to store these comparisons:
+  comparison_list <- data.frame(
+    contrast1 = character(),
+    contrast2 = character(),
+    stringsAsFactors = FALSE)
+  
+  # Introduce pair wise comparisons:
+  for (pair in pairwise_comparisons) {
+    comparison_list <- rbind(comparison_list, data.frame(
+      contrast1 = pair[1],
+      contrast2 = pair[2],
+      stringsAsFactors = FALSE
+    ))
+  }
+  
+  # Perform comparisons based on the comparison list:
+  for (grp in unique(gene_ids_per_contrast$group)) {
+    # Subset data for the current group:
+    subset_data <- gene_ids_per_contrast %>% filter(group == grp)
+    
+    for (i in 1:nrow(comparison_list)) {
+      contrast1 <- comparison_list$contrast1[i]
+      contrast2 <- comparison_list$contrast2[i]
+      
+      # Get gene IDs for each contrast:
+      gene_ids1 <- subset_data %>% filter(contrast == contrast1) %>% pull(gene_ids) %>% unlist()
+      gene_ids2 <- subset_data %>% filter(contrast == contrast2) %>% pull(gene_ids) %>% unlist()
+      
+      # Calculate Jaccard index:
+      jaccard_index <- length(intersect(gene_ids1, gene_ids2)) / length(union(gene_ids1, gene_ids2))
+      
+      # Store the result:
+      results <- rbind(results, data.frame(
+        group = grp,
+        contrast1 = contrast1,
+        contrast2 = contrast2,
+        Jaccard_Index = jaccard_index,
+        stringsAsFactors = FALSE
+      ))
+    }
+  }
+  
+  return(results)
+}
+
+```
+# Function 2: Compute pairwise Pearson´s correlation:
+This function uses replicate wise DE results to compute Pearson correlation on
+the whole transcriptome log2FC responses. 
+
+*data: the replicate wise DE results containing the log2FC of all replicates. 
+*generation: generation that we want to use 
+*logFC_generation: column name containing generation specific log2FC
+```{r}
+compute_correlations <- function(data, generation, logFC_generation) {
+  
+  data <- filtered_df %>%  dplyr::filter(generation == !!generation) %>%
+    select(gene_id, !!logFC_generation, replicate) 
+  # Pivot data so that replicates are columns and logFC values are rows
+  wide_data <- tidyr::pivot_wider(data, names_from = replicate, values_from = logFC_generation)
+  
+  # Remove the generation column for correlation computation
+  wide_data <- wide_data %>% dplyr::select(gene_id, R1, R2, R3, R4, R5, R6)
+  
+  # Compute Pearson correlation for pairwise replicates
+  cor_matrix <- stats::cor(wide_data[, c("R1", "R2", "R3", "R4", "R5", "R6")])
+  
+  # Create a data_frame:
+  cor_df <- as.data.frame(as.table(cor_matrix))
+  cor_df$contrast <- paste(cor_df$Var1, cor_df$Var2, sep = "_")
+  cor_df$generation <- generation
+  cor_df$analysis <- "Pearson´s correlation on log2FC"
+  cor_df <- cor_df %>% dplyr::select(generation, analysis, contrast, Freq)
+  colnames(cor_df) <- c("generation", "analysis", "contrast", "pearson_corr")
+  
+  # Round pearson correlation coefficient up to 3 decimals:
+  cor_df$pearson_corr <- round(cor_df$pearson_corr, 3)
+  
+  return(cor_df)
+}
+
+```
+
+# Function 3: Jaccard Index d-Jackknife per replicate
+
+This function uses "compute_jaccard_index_per_group" to compute Jaccard Index in 
+a resampling process where the Jaccard Index is computed for each iteration 
+sub-sampling the genes per group with sample size = n.
+
+* df: a data-set containing at least 3 columns:
+1) the gene_id,
+2) the replicate id,
+3) the group id (e.g., the transcriptomic group, the generation etc)
+
+* group: the column name for the grouping variable (e.g., generation)
+
+* size_dict: the sampling size (number of genes) per group.
+
+* iterations: number of iterations. (1000 iterations take less than 10 minutes)
+```{r}
+
+compute_jaccard_index_per_group_replicate <- function(df, group, contrast, size_dict, iterations = 1000) {
+
+  # Store all Jaccard indices:
+  all_results <- list()
+
+  # Get unique groups and contrasts: Note that contrasts here are the replicates
+  unique_groups <- unique(df[[group]])
+  unique_contrasts <- unique(df[[contrast]])
+set.seed(1)
+
+  for (i in 1:iterations) {
+       
+ 
+    # Empty list to store sampled data:
+    sampled_dfs <- list()
+
+    # Iterate over each (group, contrast) combination:
+    for (grp in unique_groups) {
+      for (ctr in unique_contrasts) {
+        # Get the sample size (n) for this group-contrast:
+        sample_size <- size_dict %>% 
+          filter(!!sym(group) == grp,
+          !!sym(contrast) == ctr) %>%  # !!sym() when I want to reference a column using a string
+          pull(nb_DEGs)
+
+        # Get all gene_id in a group-contrast:
+        group_contrast_genes <- df %>%
+          filter(!!sym(group) == grp,
+          !!sym(contrast) == ctr) %>%
+          pull(gene_id) %>%
+          unique()
+        
+        # Sample genes randomly in a group-contrast:
+        sampled_genes <- sample(group_contrast_genes, size = sample_size, replace = FALSE)
+        
+        # Subset data-set with the sampled genes:
+        sampled_subset <- df %>%
+          filter(gene_id %in% sampled_genes, !!sym(group) == grp, !!sym(contrast) == ctr)
+
+        sampled_dfs <- append(sampled_dfs, list(sampled_subset))
+      }
+    }
+
+    # Combine all sampled subsets
+    sampled_df <- bind_rows(sampled_dfs)
+
+    # Compute Jaccard index using another function:
+    iteration_results <- compute_jaccard_index_per_group(sampled_df, group)
+
+    # Add iteration number:
+    iteration_results$iteration <- i
+
+    # Store results:
+    all_results[[i]] <- iteration_results
+
+    # Print progress every 10% of iterations
+    if (i %% (iterations / 10) == 0) {
+      message(sprintf("Completed iteration %d of %d", i, iterations))
+    }
+  }
+
+  # Convert list to data frame:
+  final_results <- bind_rows(all_results)
+
+  return(final_results)
+}
+
+```
+# # Part 1: Replicate especific results:
+## Summary plots:
+```{r}
+
+DE_rep_specific_results %>% dplyr::filter(padj_fdr < 0.05) %>% 
+  ggplot(aes(x = contrast, fill = generation)) + 
+  geom_bar() + 
+  scale_fill_manual(values = c("#af8dc3","#762a83")) +
+  geom_text(stat='count', aes(label= after_stat(count)), position = "stack") + 
+  labs(x = "replicate", y = "N° DEGs", title = "") + 
+  theme(axis.title = element_text(size = 15))  + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  scale_x_discrete(labels = c("R1", "R2", "R3", "R4", "R5", "R6", 
+                              "R1", "R2", "R3", "R4", "R5", "R6")) + 
+  facet_wrap(~ generation,
+             scales = "free_x",
+             labeller = labeller(generation = c("gen07" = "F7", 
+                                                "gen31" = "F31"))) + 
+  guides(fill = "none") +
+  theme_classic() 
+
+
+```
+## UpSet plots:
+```{r}
+#Create a list with DEGs of each replicate:
+list_upset_plot <- list(
+  rep_1_F7 = DE_rep_specific_results %>%
+    dplyr::filter(generation == "gen07" & padj_fdr < 0.05 & contrast == "L_base_01_F7") %>%
+    dplyr::pull(gene_id), 
+  rep_2_F7 = DE_rep_specific_results %>%
+    dplyr::filter(generation == "gen07" & padj_fdr < 0.05 & contrast == "L_base_02_F7") %>%
+    dplyr::pull(gene_id),
+  rep_3_F7 = DE_rep_specific_results %>%
+    dplyr::filter(generation == "gen07" & padj_fdr < 0.05 & contrast == "L_base_03_F7") %>%
+    dplyr::pull(gene_id),
+  rep_4_F7 = DE_rep_specific_results %>%
+    dplyr::filter(generation == "gen07" & padj_fdr < 0.05 & contrast == "L_base_04_F7") %>%
+    dplyr::pull(gene_id),
+  rep_5_F7 = DE_rep_specific_results %>%
+    dplyr::filter(generation == "gen07" & padj_fdr < 0.05 & contrast == "L_base_05_F7") %>%
+    dplyr::pull(gene_id),
+  rep_6_F7 = DE_rep_specific_results %>%
+    dplyr::filter(generation == "gen07" & padj_fdr < 0.05 & contrast == "L_base_06_F7") %>%
+    dplyr::pull(gene_id),
+  rep_1_F31 = DE_rep_specific_results %>%
+    dplyr::filter(generation == "gen31" & padj_fdr < 0.05 & contrast == "L_base_01_F31") %>%
+    dplyr::pull(gene_id), 
+  rep_2_F31 = DE_rep_specific_results %>%
+    dplyr::filter(generation == "gen31" & padj_fdr < 0.05 & contrast == "L_base_02_F31") %>%
+    dplyr::pull(gene_id),
+  rep_3_F31 = DE_rep_specific_results %>%
+    dplyr::filter(generation == "gen31" & padj_fdr < 0.05 & contrast == "L_base_03_F31") %>%
+    dplyr::pull(gene_id),
+  rep_4_F31 = DE_rep_specific_results %>%
+    dplyr::filter(generation == "gen31" & padj_fdr < 0.05 & contrast == "L_base_04_F31") %>%
+    dplyr::pull(gene_id),
+  rep_5_F31 = DE_rep_specific_results %>%
+    dplyr::filter(generation == "gen31" & padj_fdr < 0.05 & contrast == "L_base_05_F31") %>%
+    dplyr::pull(gene_id),
+  rep_6_F31 = DE_rep_specific_results %>%
+    dplyr::filter(generation == "gen31" & padj_fdr < 0.05 & contrast == "L_base_06_F31") %>%
+    dplyr::pull(gene_id))
+
+# Combine all gene IDs into a single list:
+list_upset_plot2 <- sapply(list_upset_plot, identity)
+a <- list_upset_plot2[1:6] # F7
+b <- list_upset_plot2[7:12] # F31
+c <- list_upset_plot2 # F7 and F31
+
+names(a) <- c("rep 1-gen 7",
+                    "rep 2-gen 7",
+                    "rep 3-gen 7",
+                    "rep 4-gen 7",
+                    "rep 5-gen 7",
+                    "rep 6-gen 7")
+
+names(b) <- c("rep 1-gen 31",
+                    "rep 2-gen 31",
+                    "rep 3-gen 31",
+                    "rep 4-gen 31",
+                    "rep 5-gen 31",
+                    "rep 6-gen 31")
+
+names(c) <- c("rep 1-gen 7",
+                    "rep 2-gen 7",
+                    "rep 3-gen 7",
+                    "rep 4-gen 7",
+                    "rep 5-gen 7",
+                    "rep 6-gen 7",
+                    "rep 1-gen 31",
+                    "rep 2-gen 31",
+                    "rep 3-gen 31",
+                    "rep 4-gen 31",
+                    "rep 5-gen 31",
+                    "rep 6-gen 31")
+
+#upset_plot_F7: 
+
+# Data-set containing all unique DEGs:
+df1 <- data.frame(gene=unique(unlist(a)))
+# Data-set containing the genes associated to each set:
+df2 <-  lapply(a, function(x){
+  data.frame(gene = x)
+}) %>% 
+  bind_rows(.id = "path") 
+# Data-set containing the genes associated to each set:
+df_int_F7 <- lapply(df1$gene,function(x){
+  # pull the name of the intersections
+  intersection <- df2 %>% 
+    dplyr::filter(gene==x) %>% 
+    arrange(path) %>% 
+    pull("path") %>% 
+    paste0(collapse = "|")
+  # build the data-frame
+  data.frame(gene_id = x,
+             intersection = intersection)
+}) %>% 
+  bind_rows()
+df_int_F7$intersection <- gsub(".gene_id", "", df_int_F7$intersection )
+
+# Summarize the counts per intersection:
+summ_F7 <- df_int_F7 %>% 
+  dplyr::group_by(intersection) %>% 
+  dplyr::summarise(n=n()) %>% 
+  dplyr::arrange(desc(n))
+# Plot upset plot:
+upset_plot_F7 <- UpSetR::upset(fromList(a),
+                                nsets = length(a),
+                                nintersects = 200,
+                                order.by = "degree",
+                                text.scale = c(2, 2, 2, 2, 2, 1.3))  
+
+#upset_plot_F31: 
+
+#upset_plot_F31: 
+# Data-set containing all unique DEGs:
+df1 <- data.frame(gene=unique(unlist(b)))
+# Data-set containing the genes associated to each set:
+df2 <-  lapply(b, function(x){
+  data.frame(gene = x)
+}) %>% 
+  bind_rows(.id = "path") 
+# Data-set containing the genes associated to each set:
+df_int_F31 <- lapply(df1$gene,function(x){
+  # pull the name of the intersections
+  intersection <- df2 %>% 
+    dplyr::filter(gene==x) %>% 
+    arrange(path) %>% 
+    pull("path") %>% 
+    paste0(collapse = "|")
+  # build the data-frame
+  data.frame(gene_id = x, intersection = intersection)
+}) %>% 
+  bind_rows()
+df_int_F31$intersection <- gsub(".gene_id", "", df_int_F31$intersection )
+
+# Summarize the counts per intersection:
+summ_F31 <- df_int_F31 %>% 
+  dplyr::group_by(intersection) %>% 
+  dplyr::summarise(n=n()) %>% 
+  dplyr::arrange(desc(n))
+
+# Plot upset plot:
+upset_plot_F31 <- UpSetR::upset(fromList(b),
+                                nsets = length(b),
+                                nintersects = 200,
+                                order.by = "degree",
+                                text.scale = c(2, 2, 2, 2, 2, 1.3)) 
+
+upset_plot_F7
+upset_plot_F31
+
+
+```
+text.scale = c(1.3, 1.3, 1.3, 1.3, 1.3, 0.75)
+intersection size title,
+intersection size tick labels,
+set size title,
+set size tick labels,
+set names,
+and numbers above bars.
+
+## Aggregated Up-set plot
+```{r}
+## F7
+# Create a new column 'rep_count'
+summ_F7_count <- summ_F7 %>%
+  mutate(rep_count = str_count(intersection, "rep"))
+# Summarize the counts per intersection2:
+summ_F7_2 <- summ_F7_count %>%
+  group_by(rep_count) %>%
+  summarize(total_n = sum(n))
+
+## F31
+# Create a new column 'intersection2'
+summ_F31_count <-  summ_F31 %>%
+  mutate(rep_count = str_count(intersection, "rep"))
+# Summarize the counts per intersection2:
+summ_F31_2 <- summ_F31_count %>%
+  group_by(rep_count) %>%
+  summarize(total_n = sum(n))
+
+
+# Add generation:
+summ_F7_2$generation <- "7"
+summ_F31_2$generation <- "31"
+
+# Combine generations:
+summ_F7_F31 <- rbind(summ_F7_2, summ_F31_2)
+
+# Relabel rep_count:
+summ_F7_F31 <- summ_F7_F31 %>% dplyr::mutate(sharing = case_when(rep_count == 1 ~ "private",
+                                                       rep_count == 2 ~ "shared_by_2",
+                                                       rep_count == 3 ~ "shared_by_3",
+                                                       rep_count == 4 ~ "shared_by_4",
+                                                       rep_count == 5 ~ "shared_by_5",
+                                                       rep_count == 6 ~ "shared_by_6"))
+# Relevel sharing:
+summ_F7_F31$sharing <- factor(summ_F7_F31$sharing,
+                                  levels = c("shared_by_6", "shared_by_5",
+                                             "shared_by_4", "shared_by_3",
+                                             "shared_by_2", "private"))
+
+# Relevel generation:
+summ_F7_F31$generation <- factor(summ_F7_F31$generation,
+                                  levels = c("7", "31"))
+# Plotting:
+aggregated_upset_plot <- summ_F7_F31 %>%
+  ggplot(aes(x = sharing, y= total_n, color = generation)) +
+  geom_bar(stat = "identity",
+           fill = "white",
+           linewidth =2) +
+  geom_text(aes(label = total_n), vjust = -0.5, size = 3, color = "black") +  
+  labs(title = "",
+       x = "",
+       y = "N. DEGs") +
+  scale_color_manual(values = c("#af8dc3","#762a83")) +
+  theme_linedraw() +
+  theme(
+    axis.title.x = element_text(size = 16),
+    axis.title.y = element_text(size = 16),
+    axis.text.x = element_text(size = 16, angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 16, color = "black"),
+    axis.line = element_line(color='black'),
+    plot.background = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    legend.position="bottom",
+    legend.title = element_text(size = 14),
+    legend.text = element_text(size = 14),
+    strip.background=element_rect(colour="white",
+                                    fill="white")) +
+  facet_wrap(~generation)
+
+aggregated_upset_plot
+
+# Save the plot:
+#ggsave(plot = aggregated_upset_plot,
+       #"output_files/plots/aggregated_upset_plots.svg",
+       #height = 180,
+       #width = 180, 
+       #units = "mm", 
+       #dpi = 300)
+
+```
+# Create shared_upset_data:
+```{r}
+# Merge F7 and F31:
+
+a <- df_int_F7
+a$generation <- "gen07"
+b <- df_int_F31
+b$generation <- "gen31"
+
+shared_upset_data <- rbind(a, b)
+
+# Prepare the data-set:
+
+shared_upset_data <- shared_upset_data %>%
+  mutate(rep_count = str_count(intersection, "rep"))
+
+shared_upset_data <- shared_upset_data %>% dplyr::mutate(sharing = case_when(rep_count == 1 ~ "private",
+                                                       rep_count == 2 ~ "shared_by_2",
+                                                       rep_count == 3 ~ "shared_by_3",
+                                                       rep_count == 4 ~ "shared_by_4",
+                                                       rep_count == 5 ~ "shared_by_5",
+                                                       rep_count == 6 ~ "shared_by_6"))
+```
+# Create DE_rep_specific_group:
+```{r}
+# Keep needed columns from classification data-set:
+classify <- classify_trajectories %>% dplyr::select(gene_id, group, full_group, direction)
+# Remove non_significant and transitory genes:
+classify <- classify %>% dplyr::filter(!group %in% c("non_significant", "transitory_F7_F31"))
+
+# Remove non-significant genes from replicate-specific DE data-set:
+DE_rep_specific_results_filt <- DE_rep_specific_results %>% dplyr::filter(padj_fdr < 0.05)
+
+# Classify rep-specific DE results in transcriptomic trajectories:
+DE_rep_specific_group <- dplyr::left_join(DE_rep_specific_results_filt, classify, by = "gene_id")
+
+# Check composition of the data-set:
+table(DE_rep_specific_group$contrast, DE_rep_specific_group$group, DE_rep_specific_group$generation)
+
+```
+# # Part 2: Parallelism - Jaccard Index:
+## Subset data for generation 7 and 31:
+```{r}
+df_F7 <- DE_rep_specific_group %>% dplyr::filter(generation == "gen07") %>%
+  dplyr::select(c(gene_id, group, full_group, contrast, generation, direction))
+
+#NAs correspond to some genes that were not detected as significant in the
+#overall DE analysis therefore not belonging to any of the transcriptomic groups.
+na_genes <- df_F7[is.na(df_F7$group), "gene_id"]
+# Count unique gene_ids
+unique_gene_ids <- unique(na_genes)
+print("Genes not classified and excluded:")
+nrow(unique_gene_ids)
+# Remove some NAs:
+df_F7 <- na.omit(df_F7)
+
+
+df_F31 <- DE_rep_specific_group %>% dplyr::filter(generation == "gen31") %>%
+  dplyr::select(c(gene_id, group, full_group, contrast, generation, direction))
+
+#NAs correspond to some genes that were not detected as significant in the
+#overall DE analysis, therefore not belonging to any of the transcriptomic groups.
+na_genes <- df_F31[is.na(df_F31$group), "gene_id"]
+# Count unique gene_ids
+unique_gene_ids <- unique(na_genes)
+print("Genes not classified and excluded:")
+nrow(unique_gene_ids)
+# Remove some NAs:
+df_F31 <- na.omit(df_F31)
+
+```
+# Genes per group
+```{r}
+df_F7 %>%
+  group_by(group) %>%                      
+  summarise(num_genes = n_distinct(gene_id))
+
+
+df_F31 %>%
+  group_by(group) %>%                      
+  summarise(num_genes = n_distinct(gene_id))
+
+```
+
+
+## ##Jaccard Index F7 vs F31: 
+## Compute Jaccard Index per group:
+```{r}
+# Prepare dataset:
+DE_wise_DEGs <- DE_rep_specific_results_filt %>% dplyr::rename(group = generation) 
+DE_wise_DEGs <- DE_wise_DEGs %>% dplyr::select(gene_id, group, contrast)
+DE_wise_DEGs$group <- factor(DE_wise_DEGs$group, levels = c("gen07", "gen31"))
+Jacccard_F7_F31_results <- compute_jaccard_index_per_group(DE_wise_DEGs) 
+
+# Remove non needed contrasts:
+Jacccard_F7_F31_results <- na.omit(Jacccard_F7_F31_results)
+Jacccard_F7_F31_results <- Jacccard_F7_F31_results %>% dplyr::filter(Jaccard_Index > 0.001)
+
+Jacccard_F7_F31_results <- Jacccard_F7_F31_results %>% dplyr::rename(generation = group)
+  
+  
+```
+## Fig. 5 B - Plot Jaccard Index:
+```{r}
+plot_df <- Jacccard_F7_F31_results
+
+
+plot_df$Jaccard_Index <- as.numeric(plot_df$Jaccard_Index)
+plot_df$generation <- factor(plot_df$generation, levels = c("gen07","gen31"))
+
+plot_JI_F7_F31 <- plot_df %>% 
+  ggplot(aes(x = generation, y = round(Jaccard_Index, digits = 4))) + 
+  geom_boxplot(aes(color = generation, width=0.3),
+               show.legend = FALSE) +
+  geom_point(aes(color = generation), size = 2, show.legend = FALSE) + 
+  labs(x = "Generation", y = "Jaccard index", title = "") + 
+    scale_x_discrete(labels = c("7", "31")) +
+  theme_linedraw() +
+  scale_color_manual(values = c("#af8dc3", "#762a83")) + 
+theme( aspect.ratio = 1,
+    axis.title.x = element_text(size = 16),
+    axis.title.y = element_text(size = 16),
+    axis.text.x = element_text(size = 16, color = "black"),
+    axis.text.y = element_text(size = 16, color = "black"),
+    axis.line = element_line(color='black'),
+    plot.background = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    legend.position="bottom",
+    legend.title = element_text(size = 14),
+    legend.text = element_text(size = 14),
+    strip.background=element_rect(colour="white",
+                                    fill="white")) +
+  ylim(0, 1)  
+
+
+## Add statistics to the plot ##
+plot_df$Jaccard_Index <- as.numeric(plot_df$Jaccard_Index)
+plot_df$generation <- as.factor(plot_df$generation)
+
+plot_JI_F7_F31 <- plot_JI_F7_F31 +
+  stat_compare_means(method = "wilcox.test",
+                     label = "p.format", hjust = -2)
+
+plot_JI_F7_F31
+
+
+# Save the plot:
+#ggsave(plot = last_plot(),
+       #"output_files/plots/Jaccard_Index_and_parallelism/Jaccard_Index_F7_vs_F31.svg", 
+       #width = 180,
+       #height = 100,
+       #units = "mm", 
+       #dpi = 300)
+
+
+
+```
+## Fig. 5 - Jaccard index
+```{r}
+combined_plot <- (aggregated_upset_plot + plot_JI_F7_F31_rep_wise_exclude_private_and_non_concordant) / plot_JI_groups_full_dataset +  plot_annotation(tag_levels = 'A') & theme(plot.tag = element_text(size = 15))
+
+combined_plot
+
+# Save the plot:
+#ggsave(plot = last_plot(),
+       #"output_files/plots/Jaccard_Index_combined.svg", 
+       #width = 350,
+       #height = 250,
+       #units = "mm", 
+       #dpi = 300)
+
+
+```
+
+# ## Part 3.4: Replicate Frequency Spectrum from 6 replicate models
+
+## Prepare data-set:
+```{r}
+
+DE_rep_by_rep_classified_long <- DE_rep_specific_results %>%
+  pivot_longer(
+    cols = starts_with("padj_"),
+    names_to = "gen",
+    values_to = "padj_fdr")
+# Relabel generation:
+DE_rep_by_rep_classified_long <- DE_rep_by_rep_classified_long %>%
+  mutate(generation = case_when(gen == "padj_F7_F31" ~ "transitory",
+                         gen == "padj_F7" ~ "gen07",
+                         gen == "padj_F31" ~ "gen31"))
+# Remove transitory:
+DE_rep_by_rep_classified_long <- DE_rep_by_rep_classified_long %>% dplyr::filter(generation != "transitory")
+
+
+```
+## Summary plots:
+```{r}
+
+DE_rep_by_rep_classified_long %>% dplyr::filter(padj_fdr < 0.05) %>% 
+  ggplot(aes(x = replicate, fill = generation)) + 
+  geom_bar() + 
+  scale_fill_manual(values = c("#af8dc3","#762a83")) +
+  geom_text(stat='count', aes(label= after_stat(count)), position = "stack") + 
+  labs(x = "replicate", y = "N° DEGs", title = "") + 
+  theme(axis.title = element_text(size = 15))  + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  #scale_x_discrete(labels = c("R1", "R2", "R3", "R4", "R5", "R6", 
+                              #"R1", "R2", "R3", "R4", "R5", "R6")) + 
+  facet_wrap(~ generation,
+             scales = "free_x",
+             labeller = labeller(generation = c("gen07" = "F7", 
+                                                "gen31" = "F31"))) + 
+  guides(fill = "none") +
+  theme_classic() 
+
+
+```
+## UpSet plots:
+```{r}
+#Create a list with DEGs of each replicate:
+list_upset_plot <- list(
+  rep_1_F7 = DE_rep_by_rep_classified_long %>%
+    dplyr::filter(generation == "gen07" & padj_fdr < 0.05 & replicate == "R1") %>%
+    dplyr::pull(gene_id), 
+  rep_2_F7 = DE_rep_by_rep_classified_long %>%
+    dplyr::filter(generation == "gen07" & padj_fdr < 0.05 & replicate == "R2") %>%
+    dplyr::pull(gene_id),
+  rep_3_F7 = DE_rep_by_rep_classified_long %>%
+    dplyr::filter(generation == "gen07" & padj_fdr < 0.05 & replicate == "R3") %>%
+    dplyr::pull(gene_id),
+  rep_4_F7 = DE_rep_by_rep_classified_long %>%
+    dplyr::filter(generation == "gen07" & padj_fdr < 0.05 & replicate == "R4") %>%
+    dplyr::pull(gene_id),
+  rep_5_F7 = DE_rep_by_rep_classified_long %>%
+    dplyr::filter(generation == "gen07" & padj_fdr < 0.05 & replicate == "R5") %>%
+    dplyr::pull(gene_id),
+  rep_6_F7 = DE_rep_by_rep_classified_long %>%
+    dplyr::filter(generation == "gen07" & padj_fdr < 0.05 & replicate == "R6") %>%
+    dplyr::pull(gene_id),
+  rep_1_F31 = DE_rep_by_rep_classified_long %>%
+    dplyr::filter(generation == "gen31" & padj_fdr < 0.05 & replicate == "R1") %>%
+    dplyr::pull(gene_id), 
+  rep_2_F31 = DE_rep_by_rep_classified_long %>%
+    dplyr::filter(generation == "gen31" & padj_fdr < 0.05 & replicate == "R2") %>%
+    dplyr::pull(gene_id),
+  rep_3_F31 = DE_rep_by_rep_classified_long %>%
+    dplyr::filter(generation == "gen31" & padj_fdr < 0.05 & replicate == "R3") %>%
+    dplyr::pull(gene_id),
+  rep_4_F31 = DE_rep_by_rep_classified_long %>%
+    dplyr::filter(generation == "gen31" & padj_fdr < 0.05 & replicate == "R4") %>%
+    dplyr::pull(gene_id),
+  rep_5_F31 = DE_rep_by_rep_classified_long %>%
+    dplyr::filter(generation == "gen31" & padj_fdr < 0.05 & replicate == "R5") %>%
+    dplyr::pull(gene_id),
+  rep_6_F31 = DE_rep_by_rep_classified_long %>%
+    dplyr::filter(generation == "gen31" & padj_fdr < 0.05 & replicate == "R6") %>%
+    dplyr::pull(gene_id))
+
+# Combine all gene IDs into a single list:
+list_upset_plot2 <- sapply(list_upset_plot, identity)
+a <- list_upset_plot2[1:6] # F7
+b <- list_upset_plot2[7:12] # F31
+c <- list_upset_plot2 # F7 and F31
+
+names(a) <- c("rep 1-gen 7",
+                    "rep 2-gen 7",
+                    "rep 3-gen 7",
+                    "rep 4-gen 7",
+                    "rep 5-gen 7",
+                    "rep 6-gen 7")
+
+names(b) <- c("rep 1-gen 31",
+                    "rep 2-gen 31",
+                    "rep 3-gen 31",
+                    "rep 4-gen 31",
+                    "rep 5-gen 31",
+                    "rep 6-gen 31")
+
+names(c) <- c("rep 1-gen 7",
+                    "rep 2-gen 7",
+                    "rep 3-gen 7",
+                    "rep 4-gen 7",
+                    "rep 5-gen 7",
+                    "rep 6-gen 7",
+                    "rep 1-gen 31",
+                    "rep 2-gen 31",
+                    "rep 3-gen 31",
+                    "rep 4-gen 31",
+                    "rep 5-gen 31",
+                    "rep 6-gen 31")
+
+#upset_plot_F7: 
+
+# Data-set containing all unique DEGs:
+df1 <- data.frame(gene=unique(unlist(a)))
+# Data-set containing the genes associated to each set:
+df2 <-  lapply(a, function(x){
+  data.frame(gene = x)
+  }) %>% 
+  bind_rows(.id = "path") 
+# Data-set containing the genes associated to each set:
+df_int_F7 <- lapply(df1$gene,function(x){
+  # pull the name of the intersections
+  intersection <- df2 %>% 
+    dplyr::filter(gene==x) %>% 
+    arrange(path) %>% 
+    pull("path") %>% 
+    paste0(collapse = "|")
+  # build the data-frame
+  data.frame(gene_id = x,
+             intersection = intersection)
+}) %>% 
+  bind_rows()
+df_int_F7$intersection <- gsub(".gene_id", "", df_int_F7$intersection )
+
+# Summarize the counts per intersection:
+summ_F7 <- df_int_F7 %>% 
+  dplyr::group_by(intersection) %>% 
+  dplyr::summarise(n=n()) %>% 
+  dplyr::arrange(desc(n))
+# Plot upset plot:
+upset_plot_F7 <- UpSetR::upset(fromList(a),
+                                nsets = length(a),
+                                nintersects = 200,
+                                order.by = "degree",
+                                text.scale = c(2, 2, 2, 2, 2, 1.3))
+#upset_plot_F31: 
+
+# Data-set containing all unique DEGs:
+df1 <- data.frame(gene=unique(unlist(b)))
+# Data-set containing the genes associated to each set:
+df2 <-  lapply(b, function(x){
+  data.frame(gene = x)
+}) %>% 
+  bind_rows(.id = "path") 
+# Data-set containing the genes associated to each set:
+df_int_F31 <- lapply(df1$gene,function(x){
+  # pull the name of the intersections
+  intersection <- df2 %>% 
+    dplyr::filter(gene==x) %>% 
+    arrange(path) %>% 
+    pull("path") %>% 
+    paste0(collapse = "|")
+  # build the data-frame
+  data.frame(gene_id = x, intersection = intersection)
+}) %>% 
+  bind_rows()
+df_int_F31$intersection <- gsub(".gene_id", "", df_int_F31$intersection )
+
+# Summarize the counts per intersection:
+summ_F31 <- df_int_F31 %>% 
+  dplyr::group_by(intersection) %>% 
+  dplyr::summarise(n=n()) %>% 
+  dplyr::arrange(desc(n))
+
+# Plot upset plot:
+upset_plot_F31 <- UpSetR::upset(fromList(b),
+                                nsets = length(b),
+                                nintersects = 200,
+                                order.by = "degree",
+                                text.scale = c(2, 2, 2, 2, 2, 1.3)) 
+
+upset_plot_F7
+upset_plot_F31
+
+
+```
+text.scale = c(1.3, 1.3, 1.3, 1.3, 1.3, 0.75)
+intersection size title,
+intersection size tick labels,
+set size title,
+set size tick labels,
+set names,
+and numbers above bars.
+
+## Fig. 5 A - Aggregated Up-set plot
+```{r}
+## F7
+# Create a new column 'rep_count'
+summ_F7_count <- summ_F7 %>%
+  mutate(rep_count = str_count(intersection, "rep"))
+# Summarize the counts per intersection2:
+summ_F7_2 <- summ_F7_count %>%
+  group_by(rep_count) %>%
+  summarize(total_n = sum(n))
+
+## F31
+# Create a new column 'intersection2'
+summ_F31_count <-  summ_F31 %>%
+  mutate(rep_count = str_count(intersection, "rep"))
+# Summarize the counts per intersection2:
+summ_F31_2 <- summ_F31_count %>%
+  group_by(rep_count) %>%
+  summarize(total_n = sum(n))
+
+
+# Add generation:
+summ_F7_2$generation <- "7"
+summ_F31_2$generation <- "31"
+
+# Combine generations:
+summ_F7_F31 <- rbind(summ_F7_2, summ_F31_2)
+
+# Relabel rep_count:
+summ_F7_F31 <- summ_F7_F31 %>% dplyr::mutate(sharing = case_when(rep_count == 1 ~ "private",
+                                                       rep_count == 2 ~ "shared_by_2",
+                                                       rep_count == 3 ~ "shared_by_3",
+                                                       rep_count == 4 ~ "shared_by_4",
+                                                       rep_count == 5 ~ "shared_by_5",
+                                                       rep_count == 6 ~ "shared_by_6"))
+# Relevel sharing:
+summ_F7_F31$sharing <- factor(summ_F7_F31$sharing,
+                                  levels = c("shared_by_6", "shared_by_5",
+                                             "shared_by_4", "shared_by_3",
+                                             "shared_by_2", "private"))
+
+# Relevel generation:
+summ_F7_F31$generation <- factor(summ_F7_F31$generation,
+                                  levels = c("7", "31"))
+# Plotting:
+aggregated_upset_plot <- summ_F7_F31 %>%
+  ggplot(aes(x = sharing, y= total_n, color = generation)) +
+  geom_bar(stat = "identity",
+           fill = "white",
+           linewidth =2, show.legend = FALSE) +
+  geom_text(aes(label = total_n), vjust = -0.5, size = 3, color = "black") +  
+  labs(title = "",
+       x = "",
+       y = "N. DEGs") +
+  scale_color_manual(values = c("#af8dc3","#762a83")) +
+  theme_linedraw() +
+  theme(
+    axis.title.x = element_text(size = 16),
+    axis.title.y = element_text(size = 16),
+    axis.text.x = element_text(size = 16, angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 16, color = "black"),
+    axis.line = element_line(color='black'),
+    plot.background = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    legend.position="bottom",
+    legend.title = element_text(size = 14),
+    legend.text = element_text(size = 14),
+    strip.text.x.top = element_text(colour="black", face = "bold", size = 16),
+    strip.background = element_rect(colour="white",
+                                    fill="white")) +
+  scale_x_discrete(labels= c("6","5","4","3","2","1",
+                             "6","5","4","3","2","1")) +
+  theme(axis.text.x = element_text(angle = 0, vjust = 0.5, hjust=0.5)) +
+  facet_wrap(~ generation, labeller = labeller(generation = 
+    c("7" = "Generation 7",
+      "31" = "Generation 31"))) +
+  xlab("No of replicates with expression changes")
+
+aggregated_upset_plot
+
+
+```
+# Create shared_upset_data:
+```{r}
+# Merge F7 and F31:
+
+a <- df_int_F7
+a$generation <- "gen07"
+b <- df_int_F31
+b$generation <- "gen31"
+
+shared_upset_data <- rbind(a, b)
+
+# Prepare the data-set:
+
+shared_upset_data <- shared_upset_data %>%
+  mutate(rep_count = str_count(intersection, "rep"))
+
+shared_upset_data <- shared_upset_data %>% dplyr::mutate(sharing = case_when(rep_count == 1 ~ "private",
+                                                       rep_count == 2 ~ "shared_by_2",
+                                                       rep_count == 3 ~ "shared_by_3",
+                                                       rep_count == 4 ~ "shared_by_4",
+                                                       rep_count == 5 ~ "shared_by_5",
+                                                       rep_count == 6 ~ "shared_by_6"))
+
+table(shared_upset_data$rep_count, shared_upset_data$generation)
+```
+# Export shared_upset_data:
+```{r}
+export_df <- shared_upset_data
+#write_csv(export_df,"/Users/cramirez/Desktop/github_repositories/BigCages_high_protein/input_files/shared_upset_data.csv" )
+
+```
+
+## ##Jaccard Index F7 vs F31: 
+## Compute Jaccard Index per group:
+```{r}
+
+# Remove non-significant genes from replicate-specific DE data-set:
+DE_rep_by_rep_classified_filt <- DE_rep_by_rep_classified_long %>%
+  dplyr::filter(padj_fdr < 0.05) %>% dplyr::select(gene_id, replicate, generation, padj_fdr)
+
+# Prepare dataset:
+DE_wise_6models_DEGs <- DE_rep_by_rep_classified_filt %>% dplyr::rename(group = generation)
+DE_wise_6models_DEGs <- DE_wise_6models_DEGs %>% dplyr::rename(contrast = replicate) 
+DE_wise_6models_DEGs <- DE_wise_6models_DEGs %>% dplyr::select(gene_id, group, contrast)
+DE_wise_6models_DEGs$group <- factor(DE_wise_6models_DEGs$group, levels = c("gen07", "gen31"))
+Jacccard_F7_F31_results <- compute_jaccard_index_per_group(DE_wise_6models_DEGs) 
+
+# Remove non needed contrasts:
+Jacccard_F7_F31_results <- na.omit(Jacccard_F7_F31_results)
+Jacccard_F7_F31_results <- Jacccard_F7_F31_results %>% dplyr::rename(generation = group)
+  
+Jacccard_F7_F31_results %>% group_by(generation) %>% summarise(mean_JI = mean(Jaccard_Index))
+```
+## Fig. 5 B - Plot Jaccard Index:
+```{r}
+plot_df <- Jacccard_F7_F31_results
+
+
+plot_df$Jaccard_Index <- as.numeric(plot_df$Jaccard_Index)
+plot_df$generation <- factor(plot_df$generation, levels = c("gen07","gen31"))
+
+plot_JI_F7_F31 <- plot_df %>% 
+  ggplot(aes(x = generation, y = round(Jaccard_Index, digits = 4))) + 
+  geom_boxplot(aes(color = generation, width=0.3),
+               show.legend = FALSE) +
+  geom_point(aes(color = generation), size = 2, show.legend = FALSE) + 
+  labs(x = "Generation", y = "Jaccard index", title = "") + 
+    scale_x_discrete(labels = c("7", "31")) +
+  theme_linedraw() +
+  scale_color_manual(values = c("#af8dc3", "#762a83")) + 
+theme( aspect.ratio = 1,
+    axis.title.x = element_text(size = 16),
+    axis.title.y = element_text(size = 16),
+    axis.text.x = element_text(size = 16, color = "black"),
+    axis.text.y = element_text(size = 16, color = "black"),
+    axis.line = element_line(color='black'),
+    plot.background = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    legend.position="bottom",
+    legend.title = element_text(size = 14),
+    legend.text = element_text(size = 14),
+    strip.background=element_rect(colour="white",
+                                    fill="white")) +
+  ylim(0, 1)  
+
+
+## Add statistics to the plot ##
+plot_df$Jaccard_Index <- as.numeric(plot_df$Jaccard_Index)
+plot_df$generation <- as.factor(plot_df$generation)
+
+plot_JI_F7_F31 <- plot_JI_F7_F31 +
+  stat_compare_means(method = "wilcox.test",
+                     label = "p.format", hjust = -2)
+
+plot_JI_F7_F31
+
+
+```
+# Fig. 5 A and B
+```{r}
+combined_plots <-  aggregated_upset_plot + plot_JI_F7_F31 +
+  plot_layout(widths = c(2, 2))
+
+
+# Save the plot:
+#ggsave(plot = last_plot(),
+       #"output_files/plots/Jaccard_Index_and_parallelism/parallelism_rep_wise_6models.svg", 
+       #width = 300,
+       #height = 100,
+       #units = "mm", 
+       #dpi = 300)
+
+```
+# ## Part 4: Pearson´s correlation (6 replicate models)
+## Prepare the dataset:
+```{r}
+DE_rep_by_rep_classified_long %>%
+  group_by(generation, replicate) %>%
+  summarise(count = n())
+# Different sized transcriptomes are shown across replicates because their datasets were filtered by low expression independently.
+# So, I will create an intercept for them:
+# Find the intersection of gene_ids across all replicates:
+common_genes <- DE_rep_by_rep_classified_long %>%
+  group_by(gene_id) %>%
+  summarise(rep_count = n_distinct(replicate)) %>%
+  filter(rep_count == 6) %>%
+  pull(gene_id) # 10,197 genes
+# Filter data-set to keep the intersected genes
+#(i.e., transcriptome after filtering by low expression in all replicates):
+filtered_df <- DE_rep_by_rep_classified_long %>% filter(gene_id %in% common_genes)
+filtered_df %>%
+  group_by(generation, replicate) %>%
+  summarise(count = n())
+
+```
+## Compute pairwise correlations within generation
+```{r}
+pearson_corr_F7 <- compute_correlations(filtered_df, generation = "gen07", logFC_generation = "logFC_F7")
+pearson_corr_F31 <- compute_correlations(filtered_df, generation = "gen31", logFC_generation = "logFC_F31")
+
+pearson_corr_df <- rbind(pearson_corr_F7, pearson_corr_F31)
+```
+## Fig 5 B - plor pearson correlation
+```{r}
+# Exclude correlations between same replicate:
+plot_df <- pearson_corr_df %>% dplyr::filter(!contrast %in% c("R1_R1",
+                                                              "R2_R2",
+                                                              "R3_R3",
+                                                              "R4_R4",
+                                                              "R5_R5",
+                                                              "R6_R6")) 
+
+plot_df %>% ggplot(aes(x = pearson_corr, y =generation, fill = generation)) +
+  geom_violin(alpha=1) +
+  geom_boxplot(fill = "white", width=0.15, color="black", alpha=0.5, outlier.size = 0) +
+  scale_fill_manual(values = c("#af8dc3", "#762a83")) +
+  theme_linedraw() +
+  theme(
+    axis.title.x = element_text(size = 16),
+    axis.title.y = element_text(size = 16),
+    axis.text.x = element_text(size = 16, angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 16, color = "black"),
+    axis.line = element_line(color='black'),
+    plot.background = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    legend.position="bottom",
+    legend.title = element_text(size = 14),
+    legend.text = element_text(size = 14),
+    strip.text.x.top = element_text(colour="black", face = "bold", size = 16),
+    strip.background = element_rect(colour="white",
+                                    fill="white")) + 
+  xlab("Pearson's correlation coefficient") 
+
+# Save the plot:
+ggsave(plot = last_plot(),
+       "output_files/plots/Jaccard_Index_and_parallelism/pearson_correlation.svg", 
+       width = 200,
+       height = 150,
+       units = "mm", 
+       dpi = 400)
+
+
+```
+# ##Part 5: Jackkniffing Null distribution:
+Here we will compute a null distribution for Jaccard Index by randomly assigning
+genes (sample size = Ngene) as differentially expressed and computing
+Jaccard Index for Niterations. They are randomly sampled in each replicate.
+
+Ngenes = 4282 (maximum number of DEGs in one replicate)
+Niterations:
+(n!)/r!(n - r)! ---> extremely large so Niterations as large as possible
+n = 10000
+r = 4282
+
+
+* df: a data-set containing at least 3 columns:
+1) the gene_id, 
+2) the replicate id,
+3) the group id (e.g., the transcriptomic group, the generation etc)
+
+# Fig. S14
+```{r}
+
+```
+
+```{r}
+# Prepare data-set:
+test_df <- DE_rep_specific_results %>% dplyr::select(gene_id, generation, contrast)
+colnames(test_df) <- c("gene_id", "group", "contrast")
+
+# Prepare a data-set with sample sizes:
+size_dict <- DE_rep_specific_results %>%
+  dplyr::filter(padj_fdr < 0.05) %>%
+  group_by(generation, contrast) %>%
+  summarise(nb_DEGs = n())
+# Change column names:
+colnames(size_dict) <- c("group", "contrast", "nb_DEGs")
+
+# Run compute_jaccard_index_per_group_replicate:
+Jaccard_jackknife_results <- compute_jaccard_index_per_group_replicate(df = test_df,
+                                                  group = "group",
+                                                  contrast = "contrast",
+                                                  size_dict = size_dict,
+                                                  iterations = 200)
+
+Jaccard_jackknife_results <- Jaccard_jackknife_results %>% dplyr::rename(generation = group)
+
+Jaccard_jackknife_results %>% ggplot() +
+  geom_histogram(aes(x = Jaccard_Index), fill="lightgrey", bins=100) +
+  theme_classic() + geom_vline(xintercept = 0.66, color= "blue") + 
+  theme( aspect.ratio = 1,
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_text(size = 14),
+    axis.text.x = element_text(size = 14, color = "black"),
+    axis.text.y = element_text(size = 14, color = "black")) + facet_wrap(~ generation, ncol=2)
+
+# ggsave(plot = last_plot(),
+       # "output_files/plots/Jaccard_Index_and_parallelism/Jackknifing_JaccardIndex.svg", 
+       # width = 200,
+       # height = 150,
+       # units = "mm", 
+       # dpi = 400)
+
+```
+
+# ##Part 6: distribution of parallelism in overall-model
+# Classify all overall DEGs according to rep-wise categories:
+```{r}
+
+F7 <- classify %>%
+  dplyr::filter(group %in% c("plateau", "complete_reversed",
+                             "incomplete_reversed", "monotonic"))
+F7_rs <- shared_upset_data %>% dplyr::filter(generation == "gen07")
+F7_rs_classify <- dplyr::left_join(F7, F7_rs, by = "gene_id")
+# Exclude some genes that were filtered by low expression in the overall-model:
+F7_rs_classify <- na.omit(F7_rs_classify)
+
+##
+F31 <- classify %>%
+  dplyr::filter(group %in% c("plateau", "late_response",
+                             "incomplete_reversed", "monotonic"))
+F31_rs <- shared_upset_data %>% dplyr::filter(generation == "gen31")
+F31_rs_classify <- dplyr::left_join(F31, F31_rs, by = "gene_id")
+# Exclude some genes that were filtered by low expression in the overall-model:
+F31_rs_classify <- na.omit(F31_rs_classify)
+
+# Combine generations:
+summ_F7_F31 <- rbind(F7_rs_classify, F31_rs_classify)
+# Relevel sharing:
+summ_F7_F31$sharing <- factor(summ_F7_F31$sharing,
+                                  levels = c("shared_by_6", "shared_by_5",
+                                             "shared_by_4", "shared_by_3",
+                                             "shared_by_2", "private"))
+# Relevel generation:
+summ_F7_F31$generation <- factor(summ_F7_F31$generation,
+                                  levels = c("gen07", "gen31"))
+
+summ_F7_F31 %>%
+  ggplot(aes(x = sharing, color = generation)) +
+  geom_bar(fill = "white",
+           linewidth =2) +
+geom_text(stat = 'count', aes(label = ..count..),
+            vjust = -0.5, size = 5, color = "black") +
+  labs(title = "",
+       x = "No of replicates with expression changes",
+       y = "No DEGs") +
+  scale_color_manual(values = c("#af8dc3","#762a83")) +
+  scale_x_discrete(labels = c("6","5","4","3","2","1")) +
+  theme_linedraw() +
+  theme(
+    axis.title.x = element_text(size = 16),
+    axis.title.y = element_text(size = 16),
+    axis.text.x = element_text(size = 16),
+    axis.text.y = element_text(size = 16, color = "black"),
+    axis.line = element_line(color='black'),
+    plot.background = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    legend.position="none",
+    legend.title = element_text(size = 14),
+    legend.text = element_text(size = 14),
+    strip.background=element_rect(colour="white",
+                                    fill="white")) +
+  facet_wrap(~generation) 
+
+# Save plot:
+#ggsave("/Users/cramirez/Desktop/github_repositories/BigCages_high_protein/output_files/plots/Jaccard_Index_and_parallelism/rep_freq_spectrum_overall_vs_repwise.svg", last_plot())
+
+```
+
+--- END ---

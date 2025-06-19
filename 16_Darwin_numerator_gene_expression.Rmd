@@ -1,0 +1,1068 @@
+---
+title: "High-Protein BigCages - Compare magnitude of phenotypic evolution (gene expression)"
+Author: "Claudia Rmirez-Lanzas"
+Date"30/09/2024"
+---
+
+Here I want to compare the magnitude of evolution of gene expression with other studies.
+
+I will do the next analyses:
+
+- Plot Darwin numerator of all groups. 
+   1) Where do we find the higher change?
+   2) Does our plateau have slower rate as their latest time points?
+   
+- Compare Darwin numerator between artificial selection and our study,
+specially for the first 7 generations.
+   1) Does artificial selection shows a faster change?
+   2) Does our plateau have slower rate as their latest generation (G13)?
+   
+- Compare Darwin numerator between other experimental evolution studies and our study
+   1) Does our populations have stronger or lower magnitude of changes?
+
+# Load libraries:
+```{r}
+# Data handling:
+library("readxl") 
+library("writexl") 
+library("tidyverse") 
+
+
+# Plotting:
+library("ggplot2")  
+library("svglite") 
+library("patchwork") 
+library("gridExtra") 
+library("ggbreak")
+library("ggforce")
+library("ggpubr")
+library("khroma") # plotting colour blind safe
+
+# Data analysis:
+library("edgeR")# to compute cpm
+
+
+```
+# Set-up the colors:
+```{r}
+bright <- color("bright")
+plot_scheme(bright(6), colours = TRUE, names = TRUE, size = 0.9)
+#
+muted <- color("muted")
+plot_scheme(muted(9), colours = TRUE, names = TRUE, size = 0.9)
+
+color_plateau <- muted(9)[2] #"#332288"
+color_monotonic <- muted(9)[7] #"#44AA99"
+color_late_response <-  muted(9)[3] #"#DDCC77"
+color_incomplete_reversed <- muted(9)[9] #"#AA4499"
+color_complete_reversed <- muted(9)[5] #"#88CCEE" 
+color_shared <- muted(9)[1] #"#CC6677" 
+
+color_fecundity <- muted(9)[4] #"#117733"
+color_dry_weight <- muted(9)[6] #"#882255"
+color_lipid <- muted(9)[8] #"#999933"
+
+plot_scheme(muted(9)[2], colours = TRUE, names = TRUE, size = 0.9)
+plot_scheme(muted(9)[7], colours = TRUE, names = TRUE, size = 0.9)
+plot_scheme(muted(9)[9], colours = TRUE, names = TRUE, size = 0.9)
+plot_scheme(muted(9)[3], colours = TRUE, names = TRUE, size = 0.9)
+plot_scheme(muted(9)[5], colours = TRUE, names = TRUE, size = 0.9)
+plot_scheme(muted(9)[1], colours = TRUE, names = TRUE, size = 0.9)
+
+
+```
+## Function 1: compute rates: - per group 
+Following original formulation by Gingerich 1993 and Gingerich 2001.
+
+Arguments:
+*generation1: character variable indicating the generation t1 (eg., gen0)
+*generation2: character variable indicating the generation t2 (eg., gen20)
+*generation_lapse: numeric variable indicating number of generations across sampling times  
+*dataset: phenotypic data in 3 columns: (1) with group name (eg., sex),
+(2) with generation value and
+(3) with phenotypic value (eg., eggs). NOTE, Keep columns in the specified order!
+```{r}
+
+# Define the compute_haldanes_per_group function
+compute_rates_per_group <- function(generation1, generation2, t1, t2, generation_lapse, dataset) {
+  # Set generation lapse of Drosophila popultions in our experiment:
+  generation_duration_days <- 12
+  
+  # Create a copy of the data-set:
+  log_dataset <- dataset 
+  
+  # Take the natural logarithm of the phenotype column:
+  log_dataset$logged_phenotype <- log(log_dataset[, 3])
+  
+  # Group by group:
+  grouped_data <- log_dataset %>%
+    group_by(group)
+  
+  # Compute input variables for Haldane formula:
+  result <- grouped_data %>%
+    summarise(n1 = sum(generation == generation1),
+              n2 = sum(generation == generation2),
+              y1 = mean(logged_phenotype[generation == generation1], na.rm = TRUE),
+              y2 = mean(logged_phenotype[generation == generation2], na.rm = TRUE),
+              SD1 = sd(logged_phenotype[generation == generation1], na.rm = TRUE),
+              SD2 = sd(logged_phenotype[generation == generation2], na.rm = TRUE)) %>%
+    # Compute pooled standard deviation (pooled_SD) and Haldanes (H):
+    mutate(pooled_SD = sqrt(((n1 - 1) * SD1^2 + (n2 - 1) * SD2^2) / (n1 + n2 - 2))) %>%
+    mutate(Haldanes = ((y2 - y1) / pooled_SD) / generation_lapse)
+    # Compute Haldane_numerator:
+    result <- result %>% mutate(Haldane_Numerator = (y2 - y1) / pooled_SD)
+    # Compute Darwin_numerator:
+    result <- result %>% mutate(Darwin_Numerator = y2 - y1)
+    # Compute Darwins:
+    result <- result %>% mutate(time_lapse_million_years = ((t2 * generation_duration_days) / (365 * 1e6)) - ((t1 * generation_duration_days) / (365 * 1e6)))
+    result <- result %>% mutate(Darwins =  Darwin_Numerator / time_lapse_million_years) # 12 days a fly generation, 30 generations a year. So years in millions.
+  # Return results:
+  return(result)
+  
+}
+
+```
+
+## Function 2: compute rates: - per gene
+Following original formulation by Gingerich 1993 and Gingerich 2001.
+
+Here, the rate of evolution is computed for each gene independently;
+
+Arguments:
+*generation1: group of samples at time 1.
+*generation2: group of samples at time 2.
+*generation_lapse: numeric variable indicating number of generations across sampling times  
+*dataset: gene expression data in 3 columns:
+(1) with gene_id
+(2) with generation value and
+(3) with gene expression level, gene expression expressed in CPM or other normalized value. 
+```{r}
+
+# Define the compute_haldanes_per_gene function
+compute_rates_per_gene <- function(generation1,  generation2, t1, t2, generation_lapse, dataset) {
+  # Set generation lapse of Drosophila popultions in our experiment:
+  generation_duration_days <- 12
+  
+  # Create a copy of the data-set:
+  log_dataset <- dataset
+  
+  # Take the natural logarithm of the 'CPM' column:
+  log_dataset$logged_cpm <- log(log_dataset$CPM)
+  
+  # Group by group and gene_id:
+  grouped_data <- log_dataset %>%
+    group_by(group, gene_id)
+  
+  # Calculate n1, n2, y1, y2, SD1, SD2, pooled_SD for each gene_id:
+  result <- grouped_data %>%
+    summarise(n1 = sum(generation == generation1),
+              n2 = sum(generation == generation2),
+              y1 = mean(logged_cpm[generation == generation1], na.rm = TRUE),
+              y2 = mean(logged_cpm[generation == generation2], na.rm = TRUE),
+              SD1 = sd(logged_cpm[generation == generation1], na.rm = TRUE),
+              SD2 = sd(logged_cpm[generation == generation2], na.rm = TRUE)) %>%
+    mutate(pooled_SD = sqrt(((n1 - 1) * SD1^2 + (n2 - 1) * SD2^2) / (n1 + n2 - 2))) %>%
+    mutate(Haldanes = ((y2 - y1) / pooled_SD) / generation_lapse)
+   # Compute Haldane_numerator:
+    result <- result %>% mutate(Haldane_Numerator = (y2 - y1) / pooled_SD)
+    # Compute Darwin_numerator:
+    result <- result %>% mutate(Darwin_Numerator = y2 - y1)
+    # Compute Darwins:
+    result <- result %>% mutate(time_lapse_million_years = ((t2 * generation_duration_days) / (365 * 1e6)) - ((t1 * generation_duration_days) / (365 * 1e6)))
+    result <- result %>% mutate(Darwins =  Darwin_Numerator / time_lapse_million_years) # 12 days a fly generation, 30 generations a year. So years in millions.
+  # Return results:
+  return(result)
+}
+
+```
+# Import files - Big Cages High Protein
+```{r}
+BigCages_HighProt_count_table <- read.delim("input_files/count_table.csv", sep=";")
+BigCages_HighProt_classify_trajectories <- read_csv("input_files/classify_trajectories_df.csv", show_col_types = FALSE)
+BigCages_HighProt_DE_results <- read_csv("input_files/DE_overall_results.csv", show_col_types = FALSE)
+
+```
+# Import files - Souto-Maior et. al., Artificial Selection
+```{r}
+
+## Souto- Maior et. al., Artificial Selection ##
+
+Souto_Maior_Artificial_Selection <- read_csv("input_files/Souto_Maior_Artificial_Selection_GSE202600_Normalized_read_counts.csv",  show_col_types = FALSE)
+#str(norm_counts)
+Souto_Maior_Artificial_Selection$Sex <- as.factor(Souto_Maior_Artificial_Selection$Sex)
+Souto_Maior_Artificial_Selection$Generation <- as.factor(Souto_Maior_Artificial_Selection$Generation)
+# Select male transcriptome to match with our study:
+Souto_Maior_Artificial_Selection <- Souto_Maior_Artificial_Selection %>% dplyr::filter(Sex == "Male")
+# Subset 2 data-sets: one for each selection regime
+Souto_Maior_Artificial_Selection_long <- Souto_Maior_Artificial_Selection %>% dplyr::filter(Selection_scheme == "long")
+Souto_Maior_Artificial_Selection_short <- Souto_Maior_Artificial_Selection %>% dplyr::filter(Selection_scheme == "short")
+
+# Format the data-ses as expression matrices:
+Souto_Maior_Artificial_Selection_long_count <- Souto_Maior_Artificial_Selection_long[, c("Flybase_ID", "Sample_ID", "DESeq_normalized_read_count")]
+Souto_Maior_Artificial_Selection_long_count <- Souto_Maior_Artificial_Selection_long_count %>% pivot_wider(names_from = Sample_ID, values_from = DESeq_normalized_read_count)
+Souto_Maior_Artificial_Selection_long_count <- column_to_rownames(Souto_Maior_Artificial_Selection_long_count, var = "Flybase_ID")
+#
+Souto_Maior_Artificial_Selection_short_count <- Souto_Maior_Artificial_Selection_short[, c("Flybase_ID", "Sample_ID", "DESeq_normalized_read_count")]
+Souto_Maior_Artificial_Selection_short_count <- Souto_Maior_Artificial_Selection_short_count %>% pivot_wider(names_from = Sample_ID, values_from = DESeq_normalized_read_count)
+Souto_Maior_Artificial_Selection_short_count <- column_to_rownames(Souto_Maior_Artificial_Selection_short_count, var = "Flybase_ID")
+
+```
+
+# Import files - Hsu et. al., Hot I
+```{r}
+Hsu_HotI <- read_csv("input_files/Hsu_LNS_HotI_RNASeq_CGE1_count_table_transcriptome.csv",show_col_types = FALSE)
+colnames(Hsu_HotI)[1] <- "gene_id"
+# gene_id from column to row names:
+Hsu_HotI <- Hsu_HotI %>% column_to_rownames("gene_id")
+
+# Select male transcriptome to match with our study:
+Hsu_HotI <- Hsu_HotI %>% dplyr::select(contains("_m"))
+colnames(Hsu_HotI)
+
+# Rename samples: B are base population and H are hot evolved, 2818 stands for the temperature regime
+colnames(Hsu_HotI) <- c("B01", "B02", "B03", "B04", "B05",
+                            "H01_1","H01_2","H01_3",
+                            "H02_1","H02_2","H02_3",
+                            "H03_1","H03_2","H03_3",
+                            "H04_1","H04_2","H04_3",
+                            "H05_1","H05_2","H05_3",
+                            "H06_1","H06_2","H06_3",
+                            "H07_1","H07_2","H07_3",
+                            "H08_1","H08_2","H08_3",
+                            "H09_1","H09_2","H09_3",
+                            "H10_1","H10_2","H10_3")
+
+```
+# Import files: Mallard et. al., HotII and Cold
+```{r}
+Mallard_Hot_and_Cold <- read_csv("input_files/Mallard_LNS_HotII_Cold_Final_counts_Dryad_transcriptome.csv", show_col_types = FALSE)
+# gene_id from column to row names:
+Mallard_Hot_and_Cold <- Mallard_Hot_and_Cold %>% column_to_rownames("gene_id")
+
+```
+# #########
+# # Part 1: Compute rates - BigCages High Protein
+### Prepare the data-set
+```{r}
+gene_per_group <- BigCages_HighProt_classify_trajectories 
+
+# Get the gene_id of all genes: (after filtering low expression)
+all_genes_id <- gene_per_group %>% dplyr::select("gene_id") #10,197 genes
+
+# Get count table after filtering low expression: (all_genes_id only contains genes after low expression filtering)
+count_all_genes <- BigCages_HighProt_count_table %>% dplyr::filter(gene_id %in% all_genes_id$gene_id)
+
+# Gene_id to row-names:
+count_all_genes <- column_to_rownames(count_all_genes, var = "gene_id")
+
+# Compute CPM: (log = FALSE)
+cpm_all_genes <- edgeR::cpm(as.matrix(count_all_genes), 
+       normalized.lib.sizes = TRUE,
+       log = FALSE)
+
+# Gene_id to column:
+count_all_genes <- rownames_to_column(as.data.frame(count_all_genes), var = "gene_id") 
+
+# Include group information: 
+cpm_all_genes <- rownames_to_column(as.data.frame(cpm_all_genes), var = "gene_id") 
+cpm_all_genes_group <- left_join(cpm_all_genes, gene_per_group, by = "gene_id")
+cpm_all_genes_group <- relocate(cpm_all_genes_group, group, .after = gene_id)
+# Order column names (samples) alphabetically: 
+cpm_all_genes_group <- cpm_all_genes_group %>% select(order(colnames(cpm_all_genes_group)))
+cpm_all_genes_group <- cpm_all_genes_group %>% dplyr::relocate(gene_id, .before = CGE1_rep_B_1)
+cpm_all_genes_group <- cpm_all_genes_group %>% dplyr::relocate(group, .before = CGE1_rep_B_1)
+
+```
+## Compute the mean CPM of sub-replicates
+```{r}
+# Compute the mean CPM of sub-replicates within each replicate (except Base):
+rep_aggragated_mean_CPM <- cpm_all_genes_group[, 1:7]
+
+# Calculate the mean of each replicate:
+rep_aggragated_mean_CPM$CGE2_1_rep_31 <- apply(cpm_all_genes_group[, 8:10], 1, mean)
+rep_aggragated_mean_CPM$CGE2_1_rep_32 <- apply(cpm_all_genes_group[, 11:13], 1, mean)
+rep_aggragated_mean_CPM$CGE2_1_rep_33 <- apply(cpm_all_genes_group[, 14:16], 1, mean)
+rep_aggragated_mean_CPM$CGE2_1_rep_34 <- apply(cpm_all_genes_group[, 17:19], 1, mean)
+rep_aggragated_mean_CPM$CGE2_1_rep_35 <- apply(cpm_all_genes_group[, 20:22], 1, mean)
+rep_aggragated_mean_CPM$CGE2_1_rep_36 <- apply(cpm_all_genes_group[, 23:25], 1, mean)
+rep_aggragated_mean_CPM$CGE3_1_rep_31 <- apply(cpm_all_genes_group[, 26:28], 1, mean)
+rep_aggragated_mean_CPM$CGE3_1_rep_32 <- apply(cpm_all_genes_group[, 29:31], 1, mean)
+rep_aggragated_mean_CPM$CGE3_1_rep_33 <- apply(cpm_all_genes_group[, 32:34], 1, mean)
+rep_aggragated_mean_CPM$CGE3_1_rep_34 <- apply(cpm_all_genes_group[, 35:37], 1, mean)
+rep_aggragated_mean_CPM$CGE3_1_rep_35 <- apply(cpm_all_genes_group[, 38:40], 1, mean)
+rep_aggragated_mean_CPM$CGE3_1_rep_36 <- apply(cpm_all_genes_group[, 41:43], 1, mean)
+
+# Make long format:
+CPM_sample_group_long <- pivot_longer(cols = -c("gene_id","group"), 
+                                           data = rep_aggragated_mean_CPM, 
+                                           names_to = "sample", 
+                                           values_to = "CPM")
+
+# Include generation:
+CPM_sample_group_long <- CPM_sample_group_long %>% 
+  mutate(generation = case_when(grepl("CGE1", sample) ~ "gen0",
+                           grepl("CGE2", sample) ~ "gen07",
+                           grepl("CGE3", sample) ~ "gen31"))
+
+# Create generation_genID column:
+CPM_sample_group_long$generation_genID <- paste(CPM_sample_group_long$generation,
+                                                CPM_sample_group_long$gene_id, sep ="_")
+
+# Keep needed columns:
+gene_expression_df <-  CPM_sample_group_long %>% 
+  dplyr::select(c("group","generation",
+                  "gene_id", "generation_genID", "CPM"))
+gene_expression_df <- as.data.frame(gene_expression_df)
+# Format variables:
+gene_expression_df$generation <- as.factor(gene_expression_df$generation)
+gene_expression_df$group <- as.factor(gene_expression_df$group)
+gene_expression_df$CPM <- as.numeric(gene_expression_df$CPM)
+
+```
+### Compute rates per gene:
+```{r}
+gene_expression_rates_results_F0toF7 <- compute_rates_per_gene(generation1 = "gen0",
+                                                                     generation2 = "gen07",
+                                                                     generation_lapse = 7,
+                                                                     gene_expression_df,
+                                              t1=0,
+                                              t2=7)
+
+gene_expression_rates_results_F0toF7$gen_interval <- 7
+gene_expression_rates_results_F0toF7$gen <- "F0toF7"
+gene_expression_rates_results_F0toF7$study <- "HigProtein_BigCages"
+
+gene_expression_rates_results_F7toF31 <- compute_rates_per_gene(generation1 = "gen07",
+                                                                      generation2 = "gen31",
+                                                                      generation_lapse =  24,
+                                                                      gene_expression_df,
+                                              t1=7,
+                                              t2=31)
+
+gene_expression_rates_results_F7toF31$gen_interval <- 24
+gene_expression_rates_results_F7toF31$gen <- "F7toF31"
+gene_expression_rates_results_F7toF31$study <- "HigProtein_BigCages"
+
+gene_expression_rates_results_F0toF31 <- compute_rates_per_gene(generation1 = "gen0",
+                                                                      generation2 = "gen31",
+                                                                      generation_lapse = 31,
+                                                                      gene_expression_df,
+                                              t1=0,
+                                              t2=31)
+
+gene_expression_rates_results_F0toF31$gen_interval <- 31
+gene_expression_rates_results_F0toF31$gen <- "F0toF31"
+gene_expression_rates_results_F0toF31$study <- "HigProtein_BigCages"
+
+combined_rates_gene_exp <- rbind(gene_expression_rates_results_F0toF7,
+                             gene_expression_rates_results_F7toF31,
+                             gene_expression_rates_results_F0toF31)
+
+
+```
+# Create LO_pheno_rates dataset:
+```{r}
+combined_rates_gene_exp <- combined_rates_gene_exp %>% dplyr::filter(group != "transitory_F7_F31")
+
+LO_pheno_rates <- combined_rates_gene_exp 
+LO_pheno_rates <- LO_pheno_rates %>% dplyr::rename(phenotype = group)
+# Include phenotype level group:
+LO_pheno_rates$pheno_level <- "low_order_phenotype"
+# Include sex to match HO_pheno_rates data-set:
+LO_pheno_rates$sex <- "male"
+# Include phenotype_sex to match HO_pheno_rates data-set:
+LO_pheno_rates$phenotype_sex <- paste(LO_pheno_rates$phenotype, LO_pheno_rates$sex, sep="_")
+
+LO_pheno_rates$sex <- factor(LO_pheno_rates$sex)
+LO_pheno_rates$pheno_level <- factor(LO_pheno_rates$pheno_level)
+
+# Remove non significant genes :
+LO_pheno_rates <- LO_pheno_rates %>% dplyr::filter(!phenotype %in% c("non_significant","transitory_F7_F31"))
+
+LO_pheno_rates$pheno_time <- paste(LO_pheno_rates$phenotype,  LO_pheno_rates$gen_interval, sep="_")
+LO_pheno_rates$pheno_level_time <- paste(LO_pheno_rates$pheno_level,  LO_pheno_rates$gen_interval, sep="_")
+
+```
+
+## Darwin Numerator per gene: Fig. 4 C
+```{r}
+
+plot_df <- LO_pheno_rates %>% dplyr::filter(gen_interval %in% c(7, 24))
+
+plot_df$phenotype <- factor(plot_df$phenotype, levels = c("incomplete_reversed",
+                                                          "plateau",
+                                                          "monotonic",
+                                                          "complete_reversed",
+                                                          "late_response"))
+manual_palette <- c(color_incomplete_reversed,
+                    color_plateau,
+                    color_monotonic,
+                    color_complete_reversed,
+                    color_late_response)
+
+plot_Fig4C <- ggplot(data = plot_df,
+       aes(x = gen_interval,
+       y = abs(Darwin_Numerator),
+       group = interaction(gen_interval, phenotype))) +
+  geom_boxplot(data = filter(plot_df,
+                             pheno_level == "low_order_phenotype"),
+               aes(color = phenotype),
+               position = position_dodge(width = 6),
+               width = 5, linewidth = 0.8) +
+    scale_fill_manual(values = manual_palette) +
+  scale_color_manual(values = manual_palette,
+                     labels = c("Incomplete-reverse",
+                                "Plateau",
+                                "Monotonic",
+                                "Complete-reverse",
+                                "Late-response"),
+                     name = "") +
+  labs(x = "Time interval (Generations)",
+       y = "Abs. Darwin Numerator",
+       fill = "Phenotype",
+       color = "Phenotype") + 
+scale_x_continuous(breaks = c(7, 24),
+                   labels = c("0-7", "7-31"),
+                   expand = c(0.1, 0)) +
+  theme_minimal() +
+  theme(
+    axis.title.x = element_text(size = 13),
+    axis.title.y = element_text(size = 13),
+    axis.text.x = element_text(size = 13, color = "black"),
+    axis.text.y = element_text(size = 13, color = "black"),
+    axis.line = element_line(color='black'),
+    plot.background = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    legend.position="right",
+    legend.title = element_text(size = 14),
+    legend.text = element_text(size = 14),
+    axis.ticks.x = element_line(size = 0.5, color = "black"),
+    axis.ticks.y = element_line(size = 0.5, color = "black"),
+    axis.text.x.top = element_blank(),
+    axis.ticks.x.top = element_blank(),
+    axis.line.x.top = element_blank(),
+    axis.title.y.right = element_blank(),    
+    axis.text.y.right = element_blank(),     
+    axis.ticks.y.right = element_blank(),
+    axis.line.y.right = element_blank()) +
+  scale_y_break(c(1,3), scales = c(0.18,2)) +
+  scale_y_continuous(breaks = c(seq(0, 4, by = 0.5), c(25,30,35,40))) + 
+   theme(legend.position = "bottom")
+
+plot_Fig4C
+
+```
+Plot overall transcriptome 
+```{r}
+
+plot_df <- LO_pheno_rates %>% dplyr::filter(gen_interval %in% c(7, 24))
+plot_df$gen_interval2 <-  paste("gen", plot_df$gen_interval, sep="_")
+
+# Relevel gen_interval2:
+plot_df$gen_interval2 <- factor(plot_df$gen_interval2, levels = c("gen_7", "gen_24"))
+
+ggplot(data = plot_df,
+       aes(x = gen_interval2,
+       y = abs(Darwin_Numerator), color = "black")) +
+  geom_boxplot(width = 0.3) +
+  scale_color_manual(values = "black",
+                     labels = c("All DEGs"),
+                     name = "") +
+  labs(x = "Time interval (generations)",
+       y = "Abs. Darwin Numerator") + 
+scale_x_discrete(breaks = c("gen_7", "gen_24"),
+                   labels = c("0 to 7", "7 to 31"),
+                   expand = c(0.2, 0)) +
+  theme_minimal() +
+  theme(aspect.ratio = 1,
+    plot.margin = margin(0, 0, 0, 0),
+        axis.text.x.top = element_blank(),
+        axis.ticks.x.top = element_blank(),
+        axis.line.x.top = element_blank(),
+        axis.text = element_text(size = 16, color = "black"),
+        axis.title = element_text(size = 16, color = "black"),
+        axis.ticks = element_line(color = "black"),
+    axis.line = element_line(color='black'),
+    plot.background = element_blank(),
+    panel.background = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    legend.position="none",
+    legend.title = element_text(size = 16),
+    legend.text = element_text(size = 16)) +
+  scale_y_break(c(0.75, 3),
+                scales = c(0.2, 2))
+
+
+
+```
+# #########
+# # Part 2: Compute rates - Souto-Maior Artificial Selection
+## Estimate library size:
+Library size = Total number of fragments (paired ends) mapped to the genome. 
+```{r}
+lib_size <- colSums(Souto_Maior_Artificial_Selection_long_count)
+hist(lib_size)
+average_library_size <- mean(lib_size) # ~43 millions
+average_library_size
+
+lib_size <- colSums(Souto_Maior_Artificial_Selection_short_count)
+hist(lib_size)
+average_library_size <- mean(lib_size) # ~43 millions
+average_library_size
+```
+## Remove lowly expressed genes:
+Usually a gene is required to have a count of 5-10 in a library to be 
+considered expressed in that library. Users should also filter with 
+count-per-million (CPM) rather than filtering on the counts directly, as the 
+latter does not account for differences in library sizes between samples (edgeR manual).
+With a library size of around 44M, a CPM =  0.23 corresponds to 10 counts. 
+```{r}
+CPM_threshold <- 0.23 
+# This subsets the data frame by selecting only the rows where the mean 
+
+low_genes_filtered_long <- Souto_Maior_Artificial_Selection_long_count[apply(cpm(Souto_Maior_Artificial_Selection_long_count), 1, function(x){!(sum(x < CPM_threshold) >= 1)}),] # If there is one sample or more with CPM < threshold then the gene is filtered out. 
+nrow(low_genes_filtered_long) # total genes after filtering
+(nrow(Souto_Maior_Artificial_Selection_long_count)) - (nrow(low_genes_filtered_long)) # genes discarded. 
+((nrow(Souto_Maior_Artificial_Selection_long_count)) - (nrow(low_genes_filtered_long)))/(nrow(Souto_Maior_Artificial_Selection_long_count))*100 # % genes discarded. 
+(nrow(Souto_Maior_Artificial_Selection_long_count))
+
+##
+
+low_genes_filtered_short <- Souto_Maior_Artificial_Selection_short_count[apply(cpm(Souto_Maior_Artificial_Selection_short_count), 1, function(x){!(sum(x < CPM_threshold) >= 1)}),] # If there is one sample or more with CPM < threshold then the gene is filtered out. 
+nrow(low_genes_filtered_short) # total genes after filtering
+(nrow(Souto_Maior_Artificial_Selection_short_count)) - (nrow(low_genes_filtered_short)) # genes discarded. 
+((nrow(Souto_Maior_Artificial_Selection_short_count)) - (nrow(low_genes_filtered_short)))/(nrow(Souto_Maior_Artificial_Selection_short_count))*100 # % genes discarded. 
+(nrow(Souto_Maior_Artificial_Selection_short_count))
+
+```
+### Prepare dataset: 
+```{r}
+## LONG regime:
+
+# Get the gene_id of all genes: (after filtering low expression)
+all_genes_id <- data.frame(gene_id = rownames(low_genes_filtered_long)) 
+# Get count table after filtering low expression:
+count_all_genes <- Souto_Maior_Artificial_Selection_long %>%
+  dplyr::filter(Flybase_ID %in% all_genes_id$gene_id)
+# Matrix of normalized gene counts:
+matrix_counts <- count_all_genes %>% 
+  dplyr::select(Flybase_ID, Sample_ID, DESeq_normalized_read_count)
+matrix_counts <- matrix_counts %>% 
+  pivot_wider(values_from = DESeq_normalized_read_count,
+              names_from = Sample_ID)
+# Gene id to row names:
+matrix_counts <- matrix_counts %>% column_to_rownames("Flybase_ID")
+
+# Compute CPM: (log = FALSE)
+cpm_all_genes <- edgeR::cpm(as.matrix(matrix_counts), 
+       normalized.lib.sizes = TRUE,
+       log = FALSE)
+cpm_all_genes <- as.data.frame(cpm_all_genes)
+
+# gene_id to column:
+cpm_all_genes <- cpm_all_genes %>% rownames_to_column("gene_id")
+# Make long format:
+CPM_sample_group_long <- pivot_longer(cols = -c("gene_id"), 
+                                           data = cpm_all_genes, 
+                                           names_to = "sample", 
+                                           values_to = "CPM")
+gene_expression_df <- CPM_sample_group_long
+# Include biological data:
+gene_expression_df <- gene_expression_df %>% dplyr::mutate(generation = case_when(grepl("G0", sample) ~ "gen0",
+                                                                                  grepl("G2", sample) ~ "gen02",
+                                                                                  grepl("G3", sample) ~ "gen03",
+                                                                                  grepl("G4", sample) ~ "gen04",
+                                                                                  grepl("G5", sample) ~ "gen05",
+                                                                                  grepl("G6", sample) ~ "gen06",
+                                                                                  grepl("G7", sample) ~ "gen07",
+                                                                                  grepl("G8", sample) ~ "gen08",
+                                                                                  grepl("G9", sample) ~ "gen09",
+                                                                                  grepl("G10", sample) ~ "gen10",
+                                                                                  grepl("G11", sample) ~ "gen11",
+                                                                                  grepl("G12", sample) ~ "gen12",
+                                                                                  grepl("G13", sample) ~ "gen13"))
+# Include group: selection regime
+gene_expression_long_df <- gene_expression_df %>%
+  dplyr::mutate(group = case_when(grepl("L", sample) ~ "long",
+                                  grepl("S", sample) ~ "short"))
+# Format variables:
+gene_expression_long_df$sample <- as.factor(gene_expression_long_df$sample)
+gene_expression_df$CPM <- as.numeric(gene_expression_long_df$CPM)
+gene_expression_df$generation <- as.factor(gene_expression_long_df$generation)
+table(gene_expression_long_df$generation)
+
+## SHORT regime:
+
+# Get the gene_id of all genes: (after filtering low expression)
+all_genes_id <- data.frame(gene_id = rownames(low_genes_filtered_short)) 
+# Get count table after filtering low expression:
+count_all_genes <- Souto_Maior_Artificial_Selection_short %>% dplyr::filter(Flybase_ID %in% all_genes_id$gene_id)
+# Matrix of normalized gene counts:
+matrix_counts <- count_all_genes %>% 
+  dplyr::select(Flybase_ID, Sample_ID, DESeq_normalized_read_count)
+matrix_counts <- matrix_counts %>% 
+  pivot_wider(values_from = DESeq_normalized_read_count,
+              names_from = Sample_ID)
+# Gene id to row names:
+matrix_counts <- matrix_counts %>% column_to_rownames("Flybase_ID")
+
+# Compute CPM: (log = FALSE)
+cpm_all_genes <- edgeR::cpm(as.matrix(matrix_counts), 
+       normalized.lib.sizes = TRUE,
+       log = FALSE)
+cpm_all_genes <- as.data.frame(cpm_all_genes)
+
+# gene_id to column:
+cpm_all_genes <- cpm_all_genes %>% rownames_to_column("gene_id")
+# Make long format:
+CPM_sample_group_long <- pivot_longer(cols = -c("gene_id"), 
+                                           data = cpm_all_genes, 
+                                           names_to = "sample", 
+                                           values_to = "CPM")
+gene_expression_df <- CPM_sample_group_long
+
+# Include biological data:
+gene_expression_df <- gene_expression_df %>%
+  dplyr::mutate(generation = case_when(grepl("G0", sample) ~ "gen0",
+                                       grepl("G2", sample) ~ "gen02",
+                                       grepl("G3", sample) ~ "gen03",
+                                       grepl("G4", sample) ~ "gen04",
+                                       grepl("G5", sample) ~ "gen05",
+                                       grepl("G6", sample) ~ "gen06",
+                                       grepl("G7", sample) ~ "gen07",
+                                       grepl("G8", sample) ~ "gen08",
+                                       grepl("G9", sample) ~ "gen09",
+                                       grepl("G10", sample) ~ "gen10",
+                                       grepl("G11", sample) ~ "gen11",
+                                       grepl("G12", sample) ~ "gen12",
+                                       grepl("G13", sample) ~ "gen13"))
+# Include group: selection regime
+gene_expression_short_df <- gene_expression_df %>%
+  dplyr::mutate(group = case_when(grepl("L", sample) ~ "long",
+                                  grepl("S", sample) ~ "short"))
+# Format variables:
+gene_expression_short_df$sample <- as.factor(gene_expression_short_df$sample)
+gene_expression_short_df$CPM <- as.numeric(gene_expression_short_df$CPM)
+gene_expression_short_df$generation <- as.factor(gene_expression_short_df$generation)
+table(gene_expression_short_df$generation)
+
+```
+
+### Compute rates per gene:
+This dataset only contains 4 samples per generation (2 replicates per population).
+I did not averaged them to have more samples to compute Standard Deviation. 
+Here the group will be generation since I am only using samples from males of the long selection regime. 
+```{r}
+
+# LONG regime:
+
+#
+gene_expression_rates_results_F7 <- compute_rates_per_gene(generation1 = "gen0",
+                                                              generation2 = "gen07",
+                                                              generation_lapse =  7,
+                                                              gene_expression_long_df,
+                                                              t1=0,
+                                                              t2=7)
+gene_expression_rates_results_F7$gen <- "0to7"
+gene_expression_rates_results_F7$gen_interval <- 7
+gene_expression_rates_results_F7$study <- "AS_long"
+
+
+#
+gene_expression_rates_results_F13 <- compute_rates_per_gene(generation1 = "gen0",
+                                                            generation2 = "gen13",
+                                                            generation_lapse = 13,
+                                                            gene_expression_long_df,
+                                                            t1=0,
+                                                            t2=13)
+gene_expression_rates_results_F13$gen <- "0to13"
+gene_expression_rates_results_F13$gen_interval <- 13
+gene_expression_rates_results_F13$study <- "AS_long"
+
+#####
+
+combined_rates_gene_exp_long <- rbind(gene_expression_rates_results_F7,
+                             gene_expression_rates_results_F13)
+
+
+
+table(combined_rates_gene_exp_long$gen)
+table(combined_rates_gene_exp_long$gen_interval)
+
+# SHORT regime:
+
+#
+gene_expression_rates_results_F7 <- compute_rates_per_gene(generation1 = "gen0",
+                                                              generation2 = "gen07",
+                                                              generation_lapse =  7,
+                                                              gene_expression_short_df,
+                                                              t1=0,
+                                                              t2=7)
+gene_expression_rates_results_F7$gen <- "0to7"
+gene_expression_rates_results_F7$gen_interval <- 7
+gene_expression_rates_results_F7$study <- "AS_short"
+#
+gene_expression_rates_results_F13 <- compute_rates_per_gene(generation1 = "gen0",
+                                                            generation2 = "gen13",
+                                                            generation_lapse = 13,
+                                                            gene_expression_short_df,
+                                                            t1=0,
+                                                            t2=13)
+gene_expression_rates_results_F13$gen <- "0to13"
+gene_expression_rates_results_F13$gen_interval <- 13
+gene_expression_rates_results_F13$study <- "AS_short"
+
+###
+
+combined_rates_gene_exp_short <- rbind(gene_expression_rates_results_F7,
+                             gene_expression_rates_results_F13)
+
+
+
+table(combined_rates_gene_exp_short$gen)
+table(combined_rates_gene_exp_short$gen_interval)
+
+```
+## Plot Darwin Numerator:
+```{r}
+
+plot_df <- rbind(combined_rates_gene_exp_long, combined_rates_gene_exp_short)
+plot_df$gen <- factor(plot_df$gen, levels = c("0to7","0to13"))
+
+# Plot 0:
+plot_df %>% ggplot(
+       aes(x = gen,
+       y = abs(Darwin_Numerator))) +
+  geom_boxplot() +
+  theme_classic() +
+  labs(x = "",
+       y = "Abs. Darwin Numerator") + 
+  xlab("Generation") +
+  theme(legend.position="bottom") + facet_wrap(~group) +
+  ggbreak::scale_y_break(c(0.5, 1), scales = 2.5)
+
+```
+# #########
+# Part 3: Compute rates: Hsu Hot I
+## Estimate library size:
+Library size = Total number of fragments (paired ends) mapped to the genome. 
+```{r}
+lib_size <- colSums(Hsu_HotI)
+hist(lib_size)
+average_library_size <- mean(lib_size) # 12 millions
+average_library_size
+
+```
+## Remove lowly expressed genes:
+Usually a gene is required to have a count of 5-10 in a library to be 
+considered expressed in that library. Users should also filter with 
+count-per-million (CPM) rather than filtering on the counts directly, as the 
+latter does not account for differences in library sizes between samples (edgeR manual).
+With a library size of around 12M, a CPM =  0.83 corresponds to 10 counts. 
+
+```{r}
+CPM_threshold <- 0.83 
+# This subsets the data frame by selecting only the rows where the mean 
+
+low_genes_filtered_hotI <- Hsu_HotI[apply(cpm(Hsu_HotI), 1, function(x){!(sum(x < CPM_threshold) >= 1)}),] # If there is one sample or more with CPM < threshold then the gene is filtered out. 
+nrow(low_genes_filtered_hotI) # total genes after filtering
+(nrow(Hsu_HotI)) - (nrow(low_genes_filtered_hotI)) # genes discarded. 
+((nrow(Hsu_HotI)) - (nrow(low_genes_filtered_hotI)))/(nrow(Hsu_HotI))*100 # % genes discarded. 
+(nrow(Hsu_HotI))
+
+```
+### Prepare dataset:
+This dataset only contains 3 sub-replicates per evolving replicate.
+I will average the CPM across sub-reps as we do in our study.
+```{r}
+# Get the gene_id of all genes: (after filtering low expression)
+all_genes_id <- data.frame(gene_id = rownames(low_genes_filtered_hotI)) 
+
+count_males <- Hsu_HotI %>% rownames_to_column("gene_id")
+
+# Get count table after filtering low expression:
+count_all_genes <- count_males %>% dplyr::filter(gene_id %in% all_genes_id$gene_id)
+# gene_id to row names:
+count_all_genes <- count_all_genes %>% column_to_rownames("gene_id")
+# Compute CPM: (log = FALSE)
+cpm_all_genes <- edgeR::cpm(as.matrix(count_all_genes), 
+       normalized.lib.sizes = TRUE,
+       log = FALSE)
+cpm_all_genes <- as.data.frame(cpm_all_genes)
+# gene_id to column:
+cpm_all_genes <- cpm_all_genes %>% rownames_to_column("gene_id")
+
+# Compute the mean CPM of sub-replicates within each replicate (except Base):
+rep_aggragated_mean_CPM <- cpm_all_genes[, 1:6]
+# Calculate the mean of each replicate:
+rep_aggragated_mean_CPM$H_01 <- apply(cpm_all_genes[, 7:9], 1, mean)
+rep_aggragated_mean_CPM$H_02 <- apply(cpm_all_genes[, 10:12], 1, mean)
+rep_aggragated_mean_CPM$H_03 <- apply(cpm_all_genes[, 13:15], 1, mean)
+rep_aggragated_mean_CPM$H_04 <- apply(cpm_all_genes[, 16:18], 1, mean)
+rep_aggragated_mean_CPM$H_05 <- apply(cpm_all_genes[, 19:21], 1, mean)
+rep_aggragated_mean_CPM$H_06 <- apply(cpm_all_genes[, 22:24], 1, mean)
+rep_aggragated_mean_CPM$H_07 <- apply(cpm_all_genes[, 25:27], 1, mean)
+rep_aggragated_mean_CPM$H_08 <- apply(cpm_all_genes[, 28:30], 1, mean)
+rep_aggragated_mean_CPM$H_09 <- apply(cpm_all_genes[, 31:33], 1, mean)
+rep_aggragated_mean_CPM$H_10 <- apply(cpm_all_genes[, 34:36], 1, mean)
+
+# Make long format:
+CPM_sample_group_long <- pivot_longer(cols = -c("gene_id"), 
+                                           data = cpm_all_genes, 
+                                           names_to = "sample", 
+                                           values_to = "CPM")
+gene_expression_hotI_df <- CPM_sample_group_long
+
+# Include biological data:
+gene_expression_hotI_df <- gene_expression_hotI_df %>% 
+     mutate(generation = case_when(
+      grepl("B", sample) ~"gen0",
+      grepl("H", sample) ~"gen103"))
+
+gene_expression_hotI_df$group = "male"
+
+
+# Format variables:
+gene_expression_hotI_df$sample <- as.factor(gene_expression_hotI_df$sample)
+gene_expression_hotI_df$CPM <- as.numeric(gene_expression_hotI_df$CPM)
+gene_expression_hotI_df$generation <- as.factor(gene_expression_hotI_df$generation)
+
+table(gene_expression_hotI_df$generation)
+
+
+```
+### Compute rates per gene:
+```{r}
+
+gene_expression_rates_results_F103 <- compute_rates_per_gene(generation1 = "gen0",
+                                                                 generation2 = "gen103",
+                                                                 generation_lapse =  103,
+                                                                 gene_expression_hotI_df,
+                                                             t1=0,
+                                                             t2=103)
+gene_expression_rates_results_F103$gen <- "0to103"
+gene_expression_rates_results_F103$gen_interval <- 103
+gene_expression_rates_results_F103$study <- "LNS_HotI"
+
+combined_rates_gene_exp_hotI <- gene_expression_rates_results_F103
+
+
+table(combined_rates_gene_exp_hotI$gen)
+
+```
+# ##########
+# Part 4: Compute rates: Mallard Hot II and Cold:
+# Estimate library size:
+Library size = Total number of fragments (paired ends) mapped to the genome. 
+```{r}
+
+lib_size <- colSums(Mallard_Hot_and_Cold)
+hist(lib_size)
+average_library_size <- mean(lib_size) # 26 millions
+average_library_size
+
+```
+## Remove lowly expressed genes:
+Usually a gene is required to have a count of 5-10 in a library to be 
+considered expressed in that library.It is better to filter by 
+count-per-million (CPM) rather than filtering on the counts directly, as the 
+latter does not account for differences in library sizes between samples (edgeR manual).
+With a library size of around 25M, a CPM ~  2.5 corresponds to 10 counts. 
+
+```{r}
+CPM_threshold <- 2.5 
+# This subsets the data frame by selecting only the rows where the mean 
+
+low_genes_filtered_hotII_cold <- Mallard_Hot_and_Cold[apply(cpm(Mallard_Hot_and_Cold), 1, function(x){!(sum(x < CPM_threshold) >= 1)}),] # If there is one sample or more with CPM < threshold then the gene is filtered out. 
+low_genes_filtered_hotII_cold <- low_genes_filtered_hotII_cold %>% rownames_to_column("gene_id")
+
+nrow(low_genes_filtered_hotII_cold) # total genes after filtering
+(nrow(Mallard_Hot_and_Cold)) - (nrow(low_genes_filtered_hotII_cold)) # genes discarded. 
+((nrow(Mallard_Hot_and_Cold)) - (nrow(low_genes_filtered_hotII_cold)))/(nrow(Mallard_Hot_and_Cold))*100 # % genes discarded. 
+(nrow(Mallard_Hot_and_Cold))
+
+```
+# Prepare data-set
+```{r}
+
+# Get the gene_id of all genes: (after filtering low expression)
+all_genes_id <- low_genes_filtered_hotII_cold %>% dplyr::select("gene_id") 
+
+# Get count table after filtering low expression:
+count_table <- Mallard_Hot_and_Cold  %>% rownames_to_column("gene_id")
+count_all_genes <- count_table %>% dplyr::filter(gene_id %in% all_genes_id$gene_id)
+
+# Gene_id to row-names:
+count_all_genes <- column_to_rownames(count_all_genes, var = "gene_id")
+
+# Compute CPM: (log = FALSE)
+cpm_all_genes <- edgeR::cpm(as.matrix(count_all_genes), 
+       normalized.lib.sizes = TRUE,
+       log = FALSE)
+
+# Gene_id to column:
+count_all_genes <- rownames_to_column(as.data.frame(count_all_genes), var = "gene_id") 
+
+# Include group information: 
+cpm_all_genes <- rownames_to_column(as.data.frame(cpm_all_genes), var = "gene_id") 
+
+```
+## Compute the mean CPM of sub-replicates
+```{r}
+rep_aggragated_mean_CPM <- cpm_all_genes[,1:2]
+# Calculate the mean of each replicate:
+rep_aggragated_mean_CPM$Pool_242_B23_r04_t01 <- apply(cpm_all_genes[,4:5], 1, mean)
+rep_aggragated_mean_CPM$Pool_210_B23_r05_t01 <- cpm_all_genes[,6:6]
+rep_aggragated_mean_CPM$Pool_208_C23_r11_t02 <- cpm_all_genes[,7:7]
+rep_aggragated_mean_CPM$Pool_242_C23_r12_t02 <- cpm_all_genes[,8:8]
+rep_aggragated_mean_CPM$Pool_242_C23_r13_t01 <- apply(cpm_all_genes[,9:10], 1, mean)
+rep_aggragated_mean_CPM$Pool_210_C23_r14_t01 <- cpm_all_genes[, 11:11]
+rep_aggragated_mean_CPM$Pool_210_C23_r15_t01 <- apply(cpm_all_genes[,12:13], 1, mean)
+rep_aggragated_mean_CPM$Pool_207_H23_r06_t01 <- apply(cpm_all_genes[,14:16], 1, mean)
+rep_aggragated_mean_CPM$Pool_208_H23_r07_t01 <- apply(cpm_all_genes[,16:17], 1, mean)
+rep_aggragated_mean_CPM$Pool_242_H23_r08_t01 <- apply(cpm_all_genes[,18:19], 1, mean)
+rep_aggragated_mean_CPM$Pool_210_H23_r09_t01 <- cpm_all_genes[,20:20]
+rep_aggragated_mean_CPM$Pool_241_H23_r10_t02 <- cpm_all_genes[,21:21]
+
+
+# Make long format:
+CPM_sample_group_long <- pivot_longer(cols = -c("gene_id"), 
+                                           data = rep_aggragated_mean_CPM, 
+                                           names_to = "sample", 
+                                           values_to = "CPM")
+
+# Include population as generation label:
+
+ CPM_sample_group_long <- CPM_sample_group_long  %>% 
+     mutate(generation = case_when(
+      grepl("B", sample)  ~"B",
+      grepl("C", sample)  ~"C",
+      grepl("H", sample)  ~"H")) %>% droplevels()
+ 
+# Include group:
+CPM_sample_group_long$group <- "male"
+
+# Keep needed columns:
+gene_expression_hotII_cold_df <- CPM_sample_group_long %>% 
+  dplyr::select(c("group","generation",
+                  "gene_id", "CPM"))
+gene_expression_hotII_cold_df <- as.data.frame(gene_expression_hotII_cold_df)
+# Format variables:
+gene_expression_hotII_cold_df$generation <- as.factor(gene_expression_hotII_cold_df$generation)
+gene_expression_hotII_cold_df$group <- as.factor(gene_expression_hotII_cold_df$group)
+gene_expression_hotII_cold_df$CPM <- as.numeric(gene_expression_hotII_cold_df$CPM)
+
+```
+### Compute rates per gene:
+```{r}
+gene_expression_rates_results_Hot <- compute_rates_per_gene(generation1 = "B",
+                                                                     generation2 = "H",
+                                                                     generation_lapse = 64,
+                                                                     gene_expression_hotII_cold_df,
+                                                            t1=0,
+                                                            t2=64)
+gene_expression_rates_results_Hot$gen_interval <- 64
+gene_expression_rates_results_Hot$gen <- "F0toF64"
+gene_expression_rates_results_Hot$study <- "LNS_HotII"
+
+gene_expression_rates_results_Cold <- compute_rates_per_gene(generation1 = "B",
+                                                                     generation2 = "C",
+                                                                     generation_lapse = 39,
+                                                                     gene_expression_hotII_cold_df,
+                                                            t1=0,
+                                                            t2=39)
+gene_expression_rates_results_Cold$gen_interval <- 39
+gene_expression_rates_results_Cold$gen <- "F0toF39"
+gene_expression_rates_results_Cold$study <- "LNS_Cold"
+
+combined_rates_gene_exp_hotII_cold <- rbind(gene_expression_rates_results_Hot,
+                             gene_expression_rates_results_Cold)
+
+
+```
+# #########
+# Create rates BigCages dataset:
+```{r}
+combined_rates_gene_exp_LNS_BigCages_HighProtein <- LO_pheno_rates %>% dplyr::filter(gen != "F7toF31")
+
+combined_rates_gene_exp_LNS_BigCages_HighProtein <- combined_rates_gene_exp_LNS_BigCages_HighProtein %>%rename(group = sex)
+# Select same columns as previous data-sets:
+combined_rates_gene_exp_LNS_BigCages_HighProtein <- combined_rates_gene_exp_LNS_BigCages_HighProtein  %>% ungroup() %>% dplyr::select(c(group,gene_id,n1,n2,y1,y2,SD1,SD2,pooled_SD,Haldanes,                                                                                       Haldane_Numerator,Darwin_Numerator,time_lapse_million_years, Darwins,gen_interval,gen,study))
+
+```
+# Fig.4 B  Plot Darwin Numerator
+```{r}
+## Plot Darwin Numerator
+plot_df <- rbind(combined_rates_gene_exp_LNS_BigCages_HighProtein,
+                 combined_rates_gene_exp_short,
+                 combined_rates_gene_exp_hotI,
+                 combined_rates_gene_exp_hotII_cold)
+
+# Keep only 3 Generation Intervals:
+plot_df <- plot_df %>%
+  dplyr::filter(gen %in% c("0to7",  "F0toF7","0to13",  "F0toF31", "F0toF64", "F0toF39", "0to103"))
+
+
+plot_df$study <- factor(plot_df$study,
+                        levels = c("LNS_Cold", "LNS_HotII", "AS_short", "HigProtein_BigCages", "LNS_HotI")) 
+
+plot_Fig4B <- ggplot(data = plot_df,
+       aes(x = reorder(gen,
+                       abs(Darwin_Numerator)),
+       y = abs(Darwin_Numerator),
+       color = study)) +
+  geom_boxplot(linewidth = 1) +
+  theme_classic() +
+  scale_x_discrete(labels = c("0-39","0-103", "0-64", "0-7","0-13", "0-7", "0-31")) +
+  scale_colour_manual(name = "Study",
+                     labels = c("LNS - Cold", "LNS - Hot II", "AS - Short Sleep time",  "LNS - High Protein", "LNS - Hot I"),
+                      values = c("#2171b5", "#b2182b" ,
+                                 color_monotonic,
+                                 "#b2abd2", "#e08214")) +  
+  ylab("Abs. Darwin Numerator") +
+  xlab("Time interval (Generations)") +
+  theme(
+    axis.title.x = element_text(size = 13),
+    axis.title.y = element_text(size = 13),
+    axis.text.x = element_text(size = 13, color = "black"),
+    axis.text.y = element_text(size = 13, color = "black"),
+    axis.line = element_line(color='black'),
+    plot.background = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    legend.position="right",
+    legend.title = element_text(size = 14),
+    legend.text = element_text(size = 14),
+    axis.text.x.top = element_blank(),
+    axis.ticks.x.top = element_blank(),
+    axis.line.x.top = element_blank(),
+    axis.title.y.right = element_blank(),    
+    axis.text.y.right = element_blank(),     
+    axis.ticks.y.right = element_blank(),
+    axis.line.y.right = element_blank()) +
+  scale_y_break(c(1,2), scales = c(0.2,2)) +
+  scale_y_continuous(breaks = c(seq(0, 4,
+                                by = 0.25),
+                                c(1,2,3,4))) + 
+   theme(legend.position = "bottom")
+
+
+plot_Fig4B
+
+
+```
+# Combined Fig. 4 B and C
+```{r}
+combined_plots <- plot_Fig4B +  plot_Fig4C
+  
+combined_plots  
+
+# Export plot:
+#ggsave("output_files/plots/Darwins/Darwin_numerators_gene_expression.svg", last_plot(), units = "mm", height = 150, width = 300)
+
+```
+
+
+--- END ---

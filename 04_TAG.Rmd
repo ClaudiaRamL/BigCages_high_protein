@@ -1,0 +1,368 @@
+---
+title: "High-Protein BigCages - TAG content"
+Author: "Claudia Ramirez-Lanzas"
+Date: "4/11/2024"
+---
+
+# Load libraries:
+```{r}
+# Data handling:
+library("readxl")
+library("writexl")
+library("xlsx")
+library("tidyverse")
+# Stasistics:
+library("lme4")
+library("lmerTest") # to include approximate p-values in the output of lmer. 
+library("emmeans")
+library("car")
+library("HLMdiag")
+library("ggeffects")
+# Plotting:
+library("patchwork")
+library("ggplot2")
+library("ggpubr") 
+
+
+```
+# ####Part 1: Investigate raw data
+# Import data-set:
+```{r}
+TAG_Big <- read_csv("input_files/BigCagesTAG_concentrations.csv", show_col_types = FALSE)
+
+```
+*samples_dataset: contains TAG concentrations computed using inverse polynomial
+regression in 03_TAG_quantification notebook.  
+
+# Prepare data-set:
+```{r}
+# Relevel generation:
+TAG_Big$generation <- factor(TAG_Big$generation, 
+                                     levels = c("gen0" , "gen7", "gen31"))
+
+# Include population_time:
+TAG_Big$population_time <-  paste(TAG_Big$treatment, 
+                                          TAG_Big$generation, sep="_")
+
+# Relabel replicate:
+TAG_Big <- TAG_Big %>% mutate(rep = case_when(
+  grepl("CGE1", CGE)  ~"base",
+  grepl("31_", sample)  ~"01",
+  grepl("32_", sample)  ~"02",
+  grepl("33_", sample)  ~"03",
+  grepl("34_", sample)  ~"04",
+  grepl("35_", sample)  ~"05",
+  grepl("36_", sample)  ~"06"))
+
+# Include wet mg per fly:
+TAG_Big$mg_fly <- TAG_Big$total_mg /  TAG_Big$nb_flies
+TAG_Big$mg_fly <- as.numeric(TAG_Big$mg_fly)
+
+TAG_Big <- TAG_Big %>% relocate(rep, .after = CGE)
+TAG_Big <- TAG_Big %>% relocate(subrep, .after = rep)
+TAG_Big <- TAG_Big %>% relocate(population_time, .after = subrep)
+
+# Include unique id:
+TAG_Big$unique_id <- paste(TAG_Big$CGE,
+                                 TAG_Big$rep,
+                                 TAG_Big$subrep, sep="_")
+
+# Format variables:
+TAG_Big$population_time <- as.factor(TAG_Big$population_time)
+TAG_Big$sex <- as.factor(TAG_Big$sex)
+TAG_Big$treatment <- as.factor(TAG_Big$treatment)
+TAG_Big$Who <- as.factor(TAG_Big$Who)
+TAG_Big$CGE <- as.factor(TAG_Big$CGE)
+TAG_Big$rep <- as.factor(TAG_Big$rep)
+TAG_Big$subrep <- as.factor(TAG_Big$subrep)
+
+# Relevel generation:
+TAG_Big$generation <- factor(TAG_Big$generation, levels = c("gen0", "gen7", "gen31"))
+
+str(TAG_Big)
+
+```
+
+# Histogram CV:
+CV shows the technical variation, as standard conventions it should not exceed 10%.
+All samples have <10% CV.
+
+```{r}
+hist(TAG_Big$CV_concentration_1and2)
+
+```
+
+## Plot - TAG / fly
+```{r}
+# ug metabolite per fly per generation:
+plot_df <- TAG_Big
+# Change generation scale to reduce distances proportionally:
+plot_df <- plot_df %>% mutate(gen = case_when(generation == "gen0" ~ 0,
+                                              generation == "gen7" ~ 0.5,
+                                              generation == "gen31" ~ 1.5))
+
+pallete_treatments <- c("orange","#af8dc3","#762a83")
+
+plot1 <- plot_df %>% 
+  ggplot(aes(x = gen, y = ug_TAG_fly, fill = as.factor(gen))) +
+  geom_boxplot(outlier.size = 0.3) + 
+  labs(title = "") +
+  ylab("TAG equivalents (\u00b5g / fly)") +
+  xlab("Generation") +
+  #scale_x_discrete(labels = c("0", "7", "31")) +  
+  scale_fill_manual(values = pallete_treatments) + 
+  theme(text = element_text(size = 13)) + 
+  facet_wrap(~sex , ncol = 2) +
+  theme_classic() +
+  theme(aspect.ratio = 1, plot.margin = margin(0, 0, 0, 0)) + 
+  theme(axis.text.x.top  = element_blank(),
+    axis.line.x.top = element_blank(),
+    axis.ticks.x.top = element_blank(),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_text(size = 14),
+    axis.text.x = element_text(size = 14, color = "black"),
+    axis.text.y = element_text(size = 14, color = "black"),
+    axis.line = element_line(color='black'),
+    plot.background = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    legend.position="none",
+    strip.background = element_rect(
+     color="white", fill="white")) +
+  scale_x_continuous(breaks = c(0, 0.5, 1.5),
+                     labels = c(0,7,31))
+
+plot1
+plot_df <- TAG_Big
+
+plot_df %>% ggplot(aes(x = as.numeric(generation), y = ug_TAG_fly, color = rep)) +
+  geom_point(size=4, alpha=0.4) + facet_wrap(~ sex)
+  
+```
+
+
+## Plot - TAG / mg
+```{r}
+pallete_treatments <-  c("orange","#af8dc3","#762a83")
+plot2 <- TAG_Big %>% 
+  ggplot(aes(x = generation, y = ug_TAG_mg_fly, fill = generation)) +
+  geom_boxplot(outlier.size=0.3) + 
+  geom_point(position = position_dodge(width=0.75), 
+             aes(group = treatment), size = 0.3) +
+  labs(title = "") + ylab("ug TAG per mg") +
+  scale_x_discrete(labels = c("0", "7", "31")) +  
+  scale_fill_manual(values = pallete_treatments) + 
+  theme_light() + 
+  theme(text = element_text(size = 13)) + 
+  facet_wrap(~sex , ncol = 2) +
+  theme_light() + theme(legend.position = "none")
+
+plot2
+
+```
+
+## Plot - Wet weight
+```{r}
+
+wet_weight_df <- TAG_Big %>% 
+  mutate(mg_fly = total_mg / nb_flies)
+
+pallete_treatments <-  c("orange","#af8dc3","#762a83")
+
+plot3 <- wet_weight_df %>%
+  ggplot(aes(x = generation, y = mg_fly, fill = generation)) +
+  geom_boxplot(outlier.size=0.3) + 
+  labs(title = "") +   geom_point(position = position_dodge(width=0.75), 
+             aes(group = treatment), size = 0.3) +
+  scale_fill_manual(values = pallete_treatments) + 
+  ylab("Wet weight") +   
+  scale_x_discrete(labels = c("0", "7", "31")) +  
+  scale_fill_manual(values = pallete_treatments) + 
+  theme_light() + 
+  theme(text = element_text(size = 13)) + 
+  facet_wrap(~sex, ncol = 2) +
+  theme_light() + theme(legend.position = "none")
+
+
+plot3
+
+
+```
+# ####Part 2: Overall model 
+# Aggregate by mean:
+After looking at the raw data, Marlies suggested to aggregate the sub-replicates
+using the mean and fitting a simpler model where random slopes are not needed. 
+```{r}
+model_dataset_full <- TAG_Big %>% dplyr::select(c("unique_id", "CGE", "generation",
+                                                        "rep", "subrep",
+                                                        "sample", "treatment",
+                                                        "Who",
+                                                        "sex", "nb_flies",
+                                                        "total_mg", "mg_fly",
+                                                 "ug_TAG_mg_fly",
+                                                 "ug_TAG_fly"))
+
+
+# The samples from base population are not averaged:
+base <- model_dataset_full %>% dplyr::filter(CGE == "CGE1")
+
+# The samples from evolved populations are averaged within each replicate:
+evolved <- model_dataset_full %>% dplyr::filter(CGE != "CGE1")
+evolved_aggre <- evolved %>% 
+  group_by(generation, CGE,rep, sex) %>% 
+  summarise(ug_TAG_fly = mean(ug_TAG_fly),
+            mg_fly = mean(mg_fly))
+
+# Select columns to match with evolved_aggre:
+base <- base %>% dplyr::select(c(colnames(evolved_aggre)))
+
+# Combine base and aggregated evolved replicates:
+model_dataset_aggre <- rbind(base, evolved_aggre)
+
+# Format the variables:
+cols_factor <- c("rep", 
+                 "generation",
+                 "sex")
+
+model_dataset_aggre[cols_factor] <- lapply(model_dataset_aggre[cols_factor], as.factor)
+
+table(model_dataset_aggre$rep, model_dataset_aggre$generation)
+  
+```
+# Fit the model 
+Suggested by Marlies
+```{r}
+model_1 <- lmer(log10(ug_TAG_fly) ~ generation*sex + mg_fly + (1 | rep), data = model_dataset_aggre, REML = FALSE)
+
+summary(model_1)
+
+# Introduce the residuals in the data-set:
+model_dataset_1 <- model_dataset_aggre
+model_dataset_1$residuals <- residuals(model_1)
+model_dataset_1$unique_id <- paste(model_dataset_1$CGE, model_dataset_1$rep, model_dataset_1$sex, sep="_")
+
+```
+## Test model assumptions:
+```{r}
+
+# Homogeneity of variance:
+plot(predict(model_1), residuals(model_1)) # Predicted values are plotted against residuals to assess variance homogeneity.
+leveneTest(residuals ~ generation, data = model_dataset_1) # Levene's test with one independent variable. 
+
+# Normality of residuals:
+qqPlot(residuals(model_1)) # Q-Q plot of normal residuals.
+
+# Normality test 1:
+shapiro.test(residuals(model_1)) 
+
+# Normality test 2:
+#Kolmogorov-Smirnov test
+ks.test(residuals(model_1),"pnorm", mean(residuals(model_1)), sd(residuals(model_1))) 
+
+# Check assumptions for random intercept term:
+# Are random intercept normally distributed?
+ranef_rep <- ranef(model_1)[[1]]
+ranef_rep$rep <- rownames(ranef_rep)
+ranef_rep <- merge(ranef_rep, model_dataset_1[!duplicated(model_dataset_1$rep), 
+                                              c("generation", "rep")], by = "rep")
+
+qqnorm(ranef_rep$`(Intercept)`, 
+       main="QQ Plot for random intercepts per generation", 
+       col = ranef_rep$generation, pch =19)
+
+
+```
+# Contrasts:
+```{r}
+# Contrasts:
+contrasts <- summary(emmeans(model_1, pairwise ~ generation|sex, 
+                      type="response", adjust = "none")$contrasts) 
+contrasts
+
+# Predicted Means:
+predicted_means <- summary(emmeans(model_1, pairwise ~ generation|sex, 
+                      type="response", adjust="none")$emmeans) 
+
+# Change generation scale to reduce distances proportionally: (make nicer plot)
+predicted_means <- predicted_means %>% dplyr::mutate(generation = case_when(generation == "gen0" ~ 0, 
+                                                                            generation == "gen7" ~ 0.5,
+                                                                            generation == "gen31" ~ 1.5))
+
+# Plot:
+plot(emmeans(model_1, pairwise ~ generation|sex, 
+                      type="response", adjust = "none"))
+
+
+## Make a data-set with results:
+results <- as.data.frame(contrasts)
+results <- results %>%
+  separate(contrast,
+           into = c("group1", "group2"), sep = " / ")
+
+results
+
+
+```
+# Final p-values: correction across all contrasts
+The p-value of emmeans was not corrected (p.value).
+Here we use FDR correction, suggested by Marlies.
+```{r}
+# Correct for multiple testing across all contrasts and sex:
+results$padj_fdr <- p.adjust(results$p.value, method = "fdr",
+                               n = length(results$p.value))
+results
+
+# Export results:
+#write.xlsx(results, file = "output_files/S4_models_high_order_phenotypes.xlsx", sheetName="TAG_overall", append=TRUE)
+
+```
+## Plot model results: 
+```{r}
+
+pallete_treatments <- c("#f1a340","#af8dc3", "#762a83")
+
+plot_overall_tag <- predicted_means %>% ggplot(
+  aes(x = generation,
+      y = response, fill=as.factor(generation))) + 
+  geom_bar(stat = "identity", 
+           position = position_dodge(width = 0.9),
+           width=0.3) +
+  geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL),
+                position = position_dodge(width = 0.7),
+                width = 0.1) +
+  facet_wrap(~sex, 
+             labeller = as_labeller(
+               c(female = "Females", male = "Males")), scales = "free_y") +
+  scale_fill_manual(values = pallete_treatments) +  
+  labs(title = "",
+       x = "",
+       y = "TAG equivalents (ug / fly)") +  
+  theme_classic() +
+  xlab("Generation") + 
+  theme(aspect.ratio = 1, plot.margin = margin(0, 0, 0, 0)) + 
+  theme(axis.text.x.top  = element_blank(),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_text(size = 14),
+    axis.text.x = element_text(size = 14, color = "black"),
+    axis.text.y = element_text(size = 14, color = "black"),
+    axis.line = element_line(color='black'),
+    plot.background = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    strip.background = element_blank(),
+    axis.title = element_text(size = 16),
+    strip.text = element_text(size = 16, face = "bold"),
+    legend.position="none") +
+  scale_x_continuous(breaks = c(0, 0.5, 1.5),
+                     labels = c(0,7,31))
+
+
+plot_overall_tag
+
+# Export plot:
+#ggsave("output_files/plots/High_order_phenotypes/TAG_overall_emmeans.svg",
+#plot_overall_fec, units = "mm", height = 150, width = 150)
+
+```
+
+--- END ---

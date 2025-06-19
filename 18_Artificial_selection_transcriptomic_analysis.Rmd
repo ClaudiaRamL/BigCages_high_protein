@@ -1,0 +1,1271 @@
+---
+title: "Reanalysie RNAseq time series data from Souto-Maior etal., 2023 PLOS"
+Author: "ClaudiaRL"
+Date: "11/03/2024"
+---
+
+Here we perform principal component analysis (PCA), differential expression
+analysis and transcriptomic trajectories quantification in order to see the
+transcriptomic patterns of populations under truncating selection
+(directional seletion) and compare with our study populations that are close to
+the equilibrium or stasis phase.
+
+
+Here we use the transcriptomic data published by
+C. Souto-Maior, Y. L. Serrano Negron, S. T. Harbison, Nonlinear expression
+patterns and multiple shifts in gene network interactions underlie robust
+phenotypic change in Drosophila melanogaster selected for night sleep duration.
+PLOS Comput. Biol. 19, e1011389 (2023)
+
+Briefly, 4 populations of Drosophila melanogaster were selected for longer sleep time
+and shorter sleep time for 13 generations (2 for each regime) apart from the controls.
+The selection regime is that of truncating selection so 25 individuals with the
+most extreme phenotypic values were selected each generation.
+The focal phenotypes showed response to selection en each generation and
+therefore did not plateau.
+
+Here we want to use 3 times points matching as much as possible our time series 
+data-set: we will use their initial generation (G0), their G7 and their latest
+generation in the experiment (G13).
+
+
+Compile lme4 from source to avoid errors with variancePartition and Matrix package:
+See: https://bioconductor.org/packages/devel/bioc/vignettes/dreamlet/inst/doc/errors.html
+```{r}
+install.packages("BiocManager") 
+
+BiocManager::install("variancePartition")
+
+install.packages("lme4", type = "source") 
+
+BiocManager::install("edgeR")
+
+```
+# Load libraries:
+```{r}
+# Data handling:
+library("readxl")
+library("writexl")
+library("tidyverse")
+
+# Plotting:
+library("ggplot2")
+library("VennDiagram")
+library("khroma")
+library("patchwork")
+library("lessR")
+
+# Needed libraries to implement dream:
+library("variancePartition")
+library("BiocParallel")
+library("edgeR")
+library("lme4")
+
+```
+# Set-up colors:
+```{r}
+bright <- color("bright")
+plot_scheme(bright(6), colours = TRUE, names = TRUE, size = 0.9)
+#
+muted <- color("muted")
+plot_scheme(muted(9), colours = TRUE, names = TRUE, size = 0.9)
+
+color_plateau <- muted(9)[2] #"#332288"
+color_monotonic <- muted(9)[7] #"#44AA99"
+#color_late_response <-  muted(9)[3] #"#DDCC77"
+color_late_response <-  "#D4AF37"
+color_incomplete_reversed <- muted(9)[9] #"#AA4499"
+color_complete_reversed <- muted(9)[5] #"#88CCEE" 
+color_shared <- muted(9)[1] #"#CC6677" 
+
+plot_scheme(muted(9)[2], colours = TRUE, names = TRUE, size = 0.9)
+plot_scheme(muted(9)[7], colours = TRUE, names = TRUE, size = 0.9)
+plot_scheme(muted(9)[9], colours = TRUE, names = TRUE, size = 0.9)
+plot_scheme(muted(9)[3], colours = TRUE, names = TRUE, size = 0.9)
+plot_scheme(muted(9)[5], colours = TRUE, names = TRUE, size = 0.9)
+plot_scheme(muted(9)[1], colours = TRUE, names = TRUE, size = 0.9)
+
+
+```
+# Import files:
+```{r}
+norm_counts <- read_csv("input_files/Souto_Maior_Artificial_Selection_GSE202600_Normalized_read_counts.csv", show_col_types = FALSE)
+
+norm_counts$Sex <- as.factor(norm_counts$Sex)
+norm_counts$Generation <- as.factor(norm_counts$Generation)
+
+```
+* norm_counts: Data set containing the count matrix published in:
+C. Souto-Maior, Y. L. Serrano Negron, S. T. Harbison, Nonlinear expression
+patterns and multiple shifts in gene network interactions underlie robust
+phenotypic change in Drosophila melanogaster selected for night sleep duration.
+PLOS Comput. Biol. 19, e1011389 (2023)
+# Plotting functions: 
+These functions are used to plot multiple PCAs using one PCA dataset and metadata. 
+```{r}
+# PCA without labels:
+plot_pca <- function(dat, aesx, aesy, color,
+                     mytitle, scale_color_set,
+                     shape_set, PCX, PCY) {
+  ggplot2::ggplot(data = dat, aes_string(x = aesx, y = aesy,
+                                         color = color, shape = color)) +
+  geom_point(size = 4) + 
+  scale_shape_manual(values = shape_set)  +
+  scale_color_manual(values = scale_color_set) +
+  theme_classic() + 
+  theme(
+    legend.title = element_blank(),
+    panel.background = element_rect(fill = "white"),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+      text = element_text(size = 11)) +
+  labs(title=mytitle) +
+  xlab(paste0(aesx," (",round(ve[PCX]*100,2),"%)")) +
+  ylab(paste0(aesy," (",round(ve[PCY]*100,2),"%)")) + 
+    scale_color_set +
+  theme(axis.text = element_text(size = 12),  
+        axis.title = element_text(size = 14),  
+        axis.ticks = element_line(size = 1))  
+}
+
+# PCA labeling the replicates:
+plot_pca_label_rep <- function(dat, aesx, aesy, color, mytitle, scale_color_set, shape_set, PCX, PCY) {
+  ggplot2::ggplot(data = dat, aes_string(x = aesx, y = aesy, color = color, shape = color)) +
+  geom_point(size = 4) + 
+    geom_text(aes(label = rep), vjust = -1.5) +
+  scale_shape_manual(values = shape_set)  +
+  scale_color_manual(values = scale_color_set) +
+  theme_classic() + 
+  theme(
+    legend.title = element_blank(),
+    panel.background = element_rect(fill = "white"),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+      text = element_text(size = 11)) +
+  labs(title=mytitle) +
+  xlab(paste0(aesx," (",round(ve[PCX]*100,2),"%)")) +
+  ylab(paste0(aesy," (",round(ve[PCY]*100,2),"%)")) + 
+    scale_color_set +
+  theme(axis.text = element_text(size = 12),  
+        axis.title = element_text(size = 14),  
+        axis.ticks = element_line(size = 1))  
+}
+
+# PCA labeling the complete id of each sample:
+plot_pca_label_sample <- function(dat, aesx, aesy, color, mytitle, scale_color_set, PCX, PCY) {
+  ggplot2::ggplot(data = dat, aes_string(x = aesx, y = aesy, color = color)) +
+  geom_point(size = 3) + geom_text_repel(size=2, aes(label = sample),
+                                   color = "black", vjust = -1.5) +
+  theme_dark() +
+  theme(legend.title = element_blank()) + 
+    theme(text = element_text(size = 11)) + 
+  labs(title=mytitle) +
+  xlab(paste0(aesx," (",round(ve[PCX]*100,2),"%)")) +
+  ylab(paste0(aesy," (",round(ve[PCY]*100,2),"%)")) + 
+    scale_color_set
+}
+
+# PCA labeling the generation:
+plot_pca_label_generation <- function(dat, aesx, aesy, color, mytitle, scale_color_set, PCX, PCY) {
+  ggplot2::ggplot(data = dat, aes_string(x = aesx, y = aesy, color = color)) +
+  geom_point(size = 3) + geom_text(aes(label = generation),
+                                   color = "black", vjust = -1.5) +
+  theme_dark() +
+  theme(legend.title = element_blank()) + 
+    theme(text = element_text(size = 11)) + 
+  labs(title=mytitle) +
+  xlab(paste0(aesx," (",round(ve[PCX]*100,2),"%)")) +
+  ylab(paste0(aesy," (",round(ve[PCY]*100,2),"%)")) + 
+    scale_color_set
+}
+
+
+
+```
+## #LONG SLEEPING SELECTION:
+# Subset samples from long sleeping time regime: 
+```{r}
+norm_count_males <- norm_counts %>% dplyr::filter(Sex == "Male")
+norm_count_males <- norm_count_males %>% dplyr::filter(Selection_scheme == "long") %>% droplevels()
+
+#table(norm_count_males$Generation, norm_count_males$Sample_ID, norm_count_males$Population_replicate)
+
+```
+# Create metadata:
+```{r}
+subset_data <- norm_count_males[, c("Flybase_ID", "Sample_ID", "DESeq_normalized_read_count")]
+subset_data_wide <- subset_data %>% pivot_wider(names_from = Sample_ID, values_from = DESeq_normalized_read_count)
+subset_data_wide <- column_to_rownames(subset_data_wide, var = "Flybase_ID")
+
+metadata <- as_tibble(colnames(subset_data_wide))
+
+metadata <- metadata %>% 
+     mutate(generation = case_when(
+      grepl("G0", value) ~"G0",
+      grepl("G2", value) ~"G2",
+      grepl("G3", value) ~"G3",
+      grepl("G4", value) ~"G4",
+      grepl("G5", value) ~"G5",
+      grepl("G6", value) ~"G6",
+      grepl("G7", value) ~"G7",
+      grepl("G8", value) ~"G8",
+      grepl("G9", value) ~"G9",
+      grepl("G10", value) ~"G10",
+      grepl("G11", value) ~"G11",
+      grepl("G12", value) ~"G12",
+      grepl("G13", value) ~"G13"))
+
+metadata <- metadata %>% 
+     mutate(rep = case_when(
+      grepl("L1", value) ~"rep1",
+      grepl("L2", value) ~"rep2"))
+
+metadata$group_name <- paste(metadata$generation, metadata$rep, sep = "_")
+
+# Sample name as  rownames:
+metadata <- metadata %>% column_to_rownames(var = "value")
+
+```
+## Estimate library size:
+Library size = Total number of fragments (paired ends) mapped to the genome. 
+```{r}
+lib_size <- colSums(subset_data_wide)
+hist(lib_size)
+average_library_size <- mean(lib_size) # 44 millions
+average_library_size
+```
+## Remove lowly expressed genes:
+Usually a gene is required to have a count of 5-10 in a library to be 
+considered expressed in that library. Users should also filter with 
+count-per-million (CPM) rather than filtering on the counts directly, as the 
+latter does not account for differences in library sizes between samples (edgeR manual).
+With a library size of around 44M, a CPM =  0.23 corresponds to 10 counts. 
+```{r}
+CPM_threshold <- 0.23 
+# This subsets the data frame by selecting only the rows where the mean 
+
+low_genes_filtered <- subset_data_wide[apply(cpm(subset_data_wide), 1, function(x){!(sum(x < CPM_threshold) >= 1)}),] # If there is one sample or more with CPM < threshold then the gene is filtered out. 
+nrow(low_genes_filtered) # total genes after filtering
+(nrow(subset_data_wide)) - (nrow(low_genes_filtered)) # genes discarded. 
+((nrow(subset_data_wide)) - (nrow(low_genes_filtered)))/(nrow(subset_data_wide))*100 # % genes discarded. 
+(nrow(subset_data_wide))
+
+```
+# Fig. S18 A PCA
+```{r}
+# Create DGEList
+y <- DGEList(counts = low_genes_filtered, group = metadata$generation)
+
+pca <- y %>% 
+  cpm(log = TRUE) %>%
+    t() %>%
+    prcomp(center = TRUE, scale. = TRUE)
+
+pcaPlot <- as.data.frame(pca$x)
+# Label the generation group:
+pcaPlot$generation <- metadata$generation[match(rownames(pcaPlot), rownames(metadata))]
+# Compute variance explained:
+ve <- pca$sdev^2 / sum(pca$sdev^2)
+pcaPlot <- pcaPlot %>% relocate(generation, .before = PC1)
+# Reorder the levels of generation
+pcaPlot$generation <- factor(pcaPlot$generation, c("G0","G2", "G3","G4","G5",
+                                                   "G6","G7","G8","G9", "G10",
+                                                   "G11","G12","G13"))
+# Convert rownames into a column.
+pcaPlot <- cbind(sample = rownames(pcaPlot), pcaPlot)
+rownames(pcaPlot) <- 1:nrow(pcaPlot)
+# Label the replicates:
+pcaPlot$rep <- metadata$rep[match(pcaPlot$sample, metadata$rep)]
+pcaPlot <- pcaPlot %>% relocate(rep, .before = PC1)
+
+```
+
+```{r}
+# List of PCAs to be plotted:
+aesx_list <- c("PC1", "PC2", "PC3", "PC4", "PC5", "PC6","PC1","PC1","PC1")
+aesy_list <- c("PC2", "PC3", "PC4", "PC5", "PC6", "PC7","PC3","PC4","PC5")
+# List to store plots:
+plot_list <- list()
+
+for (i in seq_along(aesx_list)) {
+  
+  aesx <- aesx_list[i]
+  aesy <- aesy_list[i]
+  
+  # Extract numeric part for PCX and PCY:
+  PCX <- as.numeric(sub("PC", "", aesx))
+  PCY <- as.numeric(sub("PC", "", aesy))
+  
+  a <- plot_pca_label_rep(
+    dat = pcaPlot,
+    aesx = aesx,
+    aesy = aesy,
+    color = "generation",
+    mytitle = "",
+scale_color_set = scale_color_manual(
+          values = c("#B22222","darkblue", "blue", "darkcyan", "#438ec0",
+                     "cyan","darkgreen","green", "lightgreen","lightpink",
+                     "orange",  "yellow", "red")), 
+         shape_set = c(16,17,17,17,17,17,17,17,17,17,17,17,17,17),
+    PCX = PCX,
+    PCY = PCY)
+  #print(a)
+  plot_list[[i]] <- a
+  
+}
+  plot_list[[1]]+plot_list[[2]]+plot_list[[3]]+plot_list[[4]]+plot_list[[5]]+plot_list[[6]]+plot_list[[7]]+plot_list[[8]]+plot_list[[9]] + plot_layout(guides='collect')
+  
+```
+
+```{r}
+plot_df <- pcaPlot %>% dplyr::filter(generation %in% c("G0", "G2",  "G11", "G12", "G13"))
+
+# List of PCAs to be plotted:
+aesx_list <- c("PC1", "PC2", "PC3", "PC4", "PC5", "PC6","PC1","PC1","PC1")
+aesy_list <- c("PC2", "PC3", "PC4", "PC5", "PC6", "PC7","PC3","PC4","PC5")
+# List to store plots:
+plot_list <- list()
+
+for (i in seq_along(aesx_list)) {
+  
+  aesx <- aesx_list[i]
+  aesy <- aesy_list[i]
+  
+  # Extract numeric part for PCX and PCY:
+  PCX <- as.numeric(sub("PC", "", aesx))
+  PCY <- as.numeric(sub("PC", "", aesy))
+  
+  a <- plot_pca(
+    dat = plot_df,
+    aesx = aesx,
+    aesy = aesy,
+    color = "generation",
+    mytitle = "",
+scale_color_set = scale_color_manual(
+          values = c("#B22222", "darkblue", "orange","yellow","red")), 
+         shape_set = c(16,17,17,17,17),
+    PCX = PCX,
+    PCY = PCY)
+  #print(a)
+  plot_list[[i]] <- a
+  
+}
+  plot_list[[1]]+plot_list[[2]]+plot_list[[3]]+plot_list[[4]]+plot_list[[5]]+plot_list[[6]]+plot_list[[7]]+plot_list[[8]]+plot_list[[9]] + plot_layout(guides='collect')
+  
+```
+```{r}
+plot_df <- pcaPlot %>% dplyr::filter(generation %in% c("G0", "G9", "G11", "G12"))
+
+# List of PCAs to be plotted:
+aesx_list <- c("PC1", "PC2", "PC3", "PC4", "PC5", "PC6","PC1","PC1","PC1")
+aesy_list <- c("PC2", "PC3", "PC4", "PC5", "PC6", "PC7","PC3","PC4","PC5")
+# List to store plots:
+plot_list <- list()
+
+for (i in seq_along(aesx_list)) {
+  
+  aesx <- aesx_list[i]
+  aesy <- aesy_list[i]
+  
+  # Extract numeric part for PCX and PCY:
+  PCX <- as.numeric(sub("PC", "", aesx))
+  PCY <- as.numeric(sub("PC", "", aesy))
+  
+  a <- plot_pca(
+    dat = plot_df,
+    aesx = aesx,
+    aesy = aesy,
+    color = "generation",
+    mytitle = "",
+scale_color_set = scale_color_manual(
+          values = c("#B22222", "darkblue", "orange","yellow","red")), 
+         shape_set = c(16,17,17,17,17),
+    PCX = PCX,
+    PCY = PCY)
+  #print(a)
+  plot_list[[i]] <- a
+  
+}
+  plot_list[[1]]+plot_list[[2]]+plot_list[[3]]+plot_list[[4]]+plot_list[[5]]+plot_list[[6]]+plot_list[[7]]+plot_list[[8]]+plot_list[[9]] + plot_layout(guides='collect')
+
+```
+```{r}
+plot_df <- pcaPlot %>% dplyr::filter(generation %in% c("G0", "G7", "G13"))
+# List of PCAs to be plotted:
+aesx_list <- c("PC1", "PC2", "PC3", "PC4", "PC5", "PC6","PC1","PC1","PC1")
+aesy_list <- c("PC2", "PC3", "PC4", "PC5", "PC6", "PC7","PC3","PC4","PC5")
+# List to store plots:
+plot_list <- list()
+
+for (i in seq_along(aesx_list)) {
+  
+  aesx <- aesx_list[i]
+  aesy <- aesy_list[i]
+  
+  # Extract numeric part for PCX and PCY:
+  PCX <- as.numeric(sub("PC", "", aesx))
+  PCY <- as.numeric(sub("PC", "", aesy))
+  
+  a <- plot_pca(
+    dat = plot_df,
+    aesx = aesx,
+    aesy = aesy,
+    color = "generation",
+    mytitle = "",
+scale_color_set = scale_color_manual(
+          values = c("#B22222", "lightgreen",  "darkgreen")), 
+         shape_set = c(16,17,17,17,17),
+    PCX = PCX,
+    PCY = PCY)
+  #print(a)
+  plot_list[[i]] <- a
+  
+}
+  plot_list[[1]]+plot_list[[2]]+plot_list[[3]]+plot_list[[4]]+plot_list[[5]]+plot_list[[6]]+plot_list[[7]]+plot_list[[8]]+plot_list[[9]] + plot_layout(guides='collect')
+
+# Export plot:
+plot <- plot_list[[1]]
+#ggsave("long_sleep_PCA.svg", plot, units = "mm", height = 150, width = 150)
+
+```
+# Differential Expression Analysis:
+# Mix model with dream:
+### Create EList object with components:
+```{r}
+# Create EList object with components:
+dge <- new("EList", list(E = low_genes_filtered,
+                            genes = rownames(low_genes_filtered),
+                            samples = colnames(low_genes_filtered),
+                            metadata = metadata))
+dge
+str(dge)
+```
+# Specify the contrasts:
+```{r}
+
+form_dream <- ~ 0 + generation + (1 | rep)
+
+# As Marlies does: 
+L_0_2 <- getContrast(dge$E, form_dream, dge$metadata, c("generationG2","generationG0"))   # F7 - 0
+L_0_3 <- getContrast(dge$E, form_dream, dge$metadata, c("generationG3","generationG0"))   # F7 - 0
+L_0_4 <- getContrast(dge$E, form_dream, dge$metadata, c("generationG4","generationG0"))   # F7 - 0
+L_0_5 <- getContrast(dge$E, form_dream, dge$metadata, c("generationG5","generationG0"))   # F7 - 0
+L_0_6 <- getContrast(dge$E, form_dream, dge$metadata, c("generationG6","generationG0"))   # F7 - 0
+L_0_7 <- getContrast(dge$E, form_dream, dge$metadata, c("generationG7","generationG0"))   # F7 - 0
+L_0_8 <- getContrast(dge$E, form_dream, dge$metadata, c("generationG8","generationG0"))   # F7 - 0
+L_0_9 <- getContrast(dge$E, form_dream, dge$metadata, c("generationG9","generationG0"))   # F7 - 0
+L_0_10 <- getContrast(dge$E, form_dream, dge$metadata, c("generationG10","generationG0"))   # F7 - 0
+L_0_11 <- getContrast(dge$E, form_dream, dge$metadata, c("generationG11","generationG0"))   # F7 - 0
+L_0_12  <- getContrast(dge$E, form_dream, dge$metadata, c("generationG12","generationG0")) # F31 - base
+L_0_13  <- getContrast(dge$E, form_dream, dge$metadata, c("generationG13","generationG0"))   # F31 - F7
+L_7_13 <- getContrast(dge$E, form_dream, dge$metadata, c("generationG13","generationG7"))   # F7 - 0
+
+L <- cbind(L_0_2, L_0_3, L_0_4, L_0_5,L_0_6,L_0_7,L_0_8,L_0_9,L_0_10,L_0_11,L_0_12,L_0_13,L_7_13)
+#L <- cbind(L_0_7,L_0_13,L_7_13)
+L
+
+# Visualize contrast matrix
+plotContrasts(L)
+
+```
+# Fit the model:
+voomWithDreamWeights: 
+Transform count data to log2-counts per million (logCPM),
+estimate the mean-variance relationship and use this to compute appropriate
+observation-level weights. The data are then ready for linear mixed modelling
+with dream(). This method is the same as limma::voom(), except that it allows
+random effects in the formula
+```{r}
+rm(vobjDream)
+
+# The variable to be tested must be a fixed effect:
+form_dream <- ~ 0 + generation + (1 | rep) 
+
+# Estimate weights using linear mixed model of dream:
+vobjDream <- voomWithDreamWeights(dge$E, form_dream, dge$metadata)
+#a <- copy(vobjDream)
+
+# Fit the mixed model on each gene:
+vobjDream <- dream(exprObj = vobjDream,
+                   formula = form_dream,
+                                       data = dge$metadata,
+                                       useWeights = T,
+                                       L = L,
+                                       computeResiduals = TRUE,
+                                       quiet = F,
+                                       REML = F)
+
+
+```
+## eBayes:
+```{r}
+vobjDream_ebayes <- variancePartition::eBayes(vobjDream, robust=TRUE)
+
+```
+#Export model object:
+```{r}
+#save(vobjDream_ebayes, file = "vobjDream_ebayes_DE_Long.RData")
+```
+# Adjust p-values:
+```{r}
+
+L_F0_F7 <- topTable(vobjDream_ebayes, coef = "L_0_7", n = nrow(low_genes_filtered), adjust.method = NULL)
+L_F0_F7$contrast <- "dream_F0_F7"
+L_F0_F7 <- L_F0_F7 %>% rownames_to_column(var = "gene_id")
+
+
+L_F0_F13 <- topTable(vobjDream_ebayes, coef = "L_0_13", n = nrow(low_genes_filtered))
+L_F0_F13$contrast <- "dream_F0_F13"
+L_F0_F13 <- L_F0_F13 %>% rownames_to_column(var = "gene_id")
+
+L_F7_F13 <- topTable(vobjDream_ebayes, coef = "L_7_13", n = nrow(low_genes_filtered))
+L_F7_F13$contrast <- "dream_F7_F13"
+L_F7_F13 <- L_F7_F13 %>% rownames_to_column(var = "gene_id")
+
+# Merge the data-sets and perform p-value adjustment across all tests:
+all_DE_results <- rbind(L_F0_F7,
+                        L_F0_F13,
+                        L_F7_F13)
+
+# Remove per group adjusted val:
+all_DE_results <- all_DE_results %>% dplyr::select("gene_id","logFC","AveExpr","t","P.Value","B","contrast")
+# Adjust p-values across all contrasts:
+all_DE_results$padj_fdr <- p.adjust(all_DE_results$P.Value, method = "fdr")
+
+all_DE_results %>%
+  group_by(contrast) %>%
+  summarise(num_significant_genes = sum(padj_fdr < 0.05))
+
+
+```
+### Quantify plateau genes:
+How many plateau genes do we find if we use 3 time points,
+as similar as possible to our experiment:
+
+Generation 0, Generation 7 and Generation 13. 
+```{r}
+# Prepare data-set:
+
+# Remove unnecessary columns:
+DE_results_dream_long <- all_DE_results %>% 
+  dplyr::select(c("gene_id","logFC", "contrast", "padj_fdr"))
+
+# From wide to long:
+DE_results_wide <- DE_results_dream_long %>%
+  pivot_wider(
+    names_from = contrast,
+    values_from = c(logFC, padj_fdr))
+
+# Change column names:
+colnames(DE_results_wide) <- c("gene_id", 
+                           "logFC_F7",
+                           "logFC_F13", 
+                           "logFC_F7_F13",
+                           "padj_F7", 
+                           "padj_F13",
+                           "padj_F7_F13")
+
+```
+
+```{r}
+# Classify genes:
+
+classify_df <- DE_results_wide
+
+# Set variables:
+alpha_tresh <- 0.05 # alpha tresshold for DEGs
+logFC_tresh <- 0    # log2FC tresshold for DEGs
+
+# Create a empty group column:
+classify_df$group <- "NA"
+
+# Define logical conditions:
+#
+non_significant <- classify_df$padj_F7 > alpha_tresh &
+  classify_df$padj_F13 > alpha_tresh &
+  classify_df$padj_F7_F13 > alpha_tresh
+#
+plateau_up <- classify_df$padj_F7 < alpha_tresh &
+  classify_df$padj_F13 < alpha_tresh &
+  classify_df$padj_F7_F13 > alpha_tresh &
+  classify_df$logFC_F13 > logFC_tresh
+#
+plateau_down <- classify_df$padj_F7 < alpha_tresh &
+  classify_df$padj_F13 < alpha_tresh &
+  classify_df$padj_F7_F13 > alpha_tresh &
+  classify_df$logFC_F13 < logFC_tresh
+#
+transitory_F7_F13 <- classify_df$padj_F7 > alpha_tresh &
+  classify_df$padj_F13 > alpha_tresh &
+  classify_df$padj_F7_F13 < alpha_tresh
+#
+F7_private_up <- classify_df$padj_F7 < alpha_tresh &
+  classify_df$padj_F13 > alpha_tresh &
+  classify_df$logFC_F7 > logFC_tresh
+#
+F7_private_down <- classify_df$padj_F7 < alpha_tresh &
+  classify_df$padj_F13 > alpha_tresh &
+  classify_df$logFC_F7 < logFC_tresh
+#
+F13_private_up <- classify_df$padj_F7 > alpha_tresh &
+  classify_df$padj_F13 < alpha_tresh &
+  classify_df$logFC_F13 > logFC_tresh
+#
+evolving_up <- classify_df$padj_F7 < alpha_tresh &
+  classify_df$padj_F13 < alpha_tresh &
+  classify_df$padj_F7_F13 < alpha_tresh &
+  ((classify_df$logFC_F7 > logFC_tresh &
+      classify_df$logFC_F13 > logFC_tresh) &
+     classify_df$logFC_F7 < classify_df$logFC_F13) 
+#
+reversed_up <- classify_df$padj_F7 < alpha_tresh &
+  classify_df$padj_F13 < alpha_tresh &
+  classify_df$padj_F7_F13 < alpha_tresh &
+  (classify_df$logFC_F7 > logFC_tresh &
+     classify_df$logFC_F7 > classify_df$logFC_F13)
+#
+F13_private_down <- classify_df$padj_F7 > alpha_tresh &
+  classify_df$padj_F13 < alpha_tresh &
+  classify_df$logFC_F13 < logFC_tresh
+#
+evolving_down <- classify_df$padj_F7 < alpha_tresh &
+  classify_df$padj_F13 < alpha_tresh &
+  classify_df$padj_F7_F13 < alpha_tresh &
+  ((classify_df$logFC_F7 < logFC_tresh &
+      classify_df$logFC_F13 < logFC_tresh) &
+     classify_df$logFC_F7 > classify_df$logFC_F13)
+#
+reversed_down <- classify_df$padj_F7 < alpha_tresh &
+  classify_df$padj_F13 < alpha_tresh &
+  classify_df$padj_F7_F13 < alpha_tresh &
+  (classify_df$logFC_F7 < logFC_tresh &
+  classify_df$logFC_F7 < classify_df$logFC_F13)
+
+##
+# Apply conditions to the data-set:
+classify_df$group[non_significant] <- "non_significant"
+classify_df$direction[non_significant] <- "none"
+classify_df$group[plateau_up] <- "plateau"
+classify_df$direction[plateau_up] <- "up"
+classify_df$group[plateau_down] <- "plateau"
+classify_df$direction[plateau_down] <- "down"
+classify_df$group[transitory_F7_F13] <- "transitory_F7_F13"
+classify_df$direction[transitory_F7_F13] <- "none"
+classify_df$group[F7_private_up] <- "complete_reversed"
+classify_df$direction[F7_private_up] <- "up"
+classify_df$group[F7_private_down] <- "complete_reversed"
+classify_df$direction[F7_private_down] <- "down"
+classify_df$group[F13_private_up] <- "late_response"
+classify_df$direction[F13_private_up] <- "up"
+classify_df$group[evolving_up] <- "monotonic"
+classify_df$direction[evolving_up] <- "up"
+classify_df$group[reversed_up] <- "incomplete_reversed"
+classify_df$direction[reversed_up] <- "up"
+classify_df$group[F13_private_down] <- "late_response"
+classify_df$direction[F13_private_down] <- "down"
+classify_df$group[evolving_down] <- "monotonic"
+classify_df$direction[evolving_down] <- "down"
+classify_df$group[reversed_down] <- "incomplete_reversed"
+classify_df$direction[reversed_down] <- "down"
+
+
+# Check the genes per group:
+table(classify_df$group, classify_df$direction)
+
+# Include full group variable:
+classify_df$full_group <- paste(classify_df$group, classify_df$direction, sep = "_")
+classify_df <- classify_df %>% dplyr::relocate(full_group, .after = direction)
+
+# Format variables:
+classify_df$group <- as.factor(classify_df$group)
+classify_df$full_group <- as.factor(classify_df$full_group)
+
+# Arrange levels of group:
+classify_df$group <-  factor(classify_df$group,
+                             levels = c("non_significant",
+                                        "plateau", 
+                                        "monotonic", 
+                                        "incomplete_reversed", 
+                                        "complete_reversed", 
+                                        "late_response", 
+                                        "transitory_F7_F13"))
+
+
+```
+# Fig. S18 B Pie chart with proportion of DEGs:
+```{r}
+classify_df %>% ggplot(aes(x=group)) +
+  geom_bar() +
+  theme_classic() 
+
+## First remove non_significant genes:
+filt_df <- classify_df %>% dplyr::filter(!group %in% c("non_significant", "transitory_F7_F13"))
+
+filt_df$group <- factor(filt_df$group, levels = c("plateau",
+                                                  "monotonic",
+                                                  "incomplete_reversed",
+                                                  "complete_reversed",
+                                                  "late_response"))
+manual_palette <- c(color_plateau,
+                    color_monotonic,
+                    color_incomplete_reversed,
+                    color_complete_reversed,
+                    color_late_response)                                                  
+
+# Donut chart
+donutchart <- lessR::PieChart(group,
+                       data = filt_df,
+                       main = NULL,
+                       #color="white",
+                       #lty="solid",
+                       labels_size = 1.3,
+                       #lwd=3,
+                       fill = manual_palette)
+
+```
+## #SHORT SLEEPING SELECTION:
+# Subset samples from long sleeping time regime: 
+```{r}
+norm_count_males <- norm_counts %>% dplyr::filter(Sex == "Male")
+norm_count_males <- norm_count_males %>% dplyr::filter(Selection_scheme == "short") %>% droplevels()
+
+#table(norm_count_males$Generation, norm_count_males$Sample_ID, norm_count_males$Population_replicate)
+
+```
+# Create metadata:
+```{r}
+subset_data <- norm_count_males[, c("Flybase_ID", "Sample_ID", "DESeq_normalized_read_count")]
+subset_data_wide <- subset_data %>% pivot_wider(names_from = Sample_ID, values_from = DESeq_normalized_read_count)
+subset_data_wide <- column_to_rownames(subset_data_wide, var = "Flybase_ID")
+
+metadata <- as_tibble(colnames(subset_data_wide))
+
+metadata <- metadata %>% 
+     mutate(generation = case_when(
+      grepl("G0", value) ~"G0",
+      grepl("G2", value) ~"G2",
+      grepl("G3", value) ~"G3",
+      grepl("G4", value) ~"G4",
+      grepl("G5", value) ~"G5",
+      grepl("G6", value) ~"G6",
+      grepl("G7", value) ~"G7",
+      grepl("G8", value) ~"G8",
+      grepl("G9", value) ~"G9",
+      grepl("G10", value) ~"G10",
+      grepl("G11", value) ~"G11",
+      grepl("G12", value) ~"G12",
+      grepl("G13", value) ~"G13"))
+
+metadata <- metadata %>% 
+     mutate(rep = case_when(
+      grepl("S1", value) ~"rep1",
+      grepl("S2", value) ~"rep2"))
+
+metadata$group_name <- paste(metadata$generation, metadata$rep, sep = "_")
+
+# Sample name as  rownames:
+metadata <- metadata %>% column_to_rownames(var = "value")
+
+```
+## Estimate library size:
+Library size = Total number of fragments (paired ends) mapped to the genome. 
+```{r}
+lib_size <- colSums(subset_data_wide)
+hist(lib_size)
+average_library_size <- mean(lib_size) # 44 millions
+average_library_size
+```
+## Remove lowly expressed genes:
+Usually a gene is required to have a count of 5-10 in a library to be 
+considered expressed in that library. Users should also filter with 
+count-per-million (CPM) rather than filtering on the counts directly, as the 
+latter does not account for differences in library sizes between samples (edgeR manual).
+With a library size of around 44M, a CPM =  0.23 corresponds to 10 counts. 
+```{r}
+CPM_threshold <- 0.23 
+# This subsets the data frame by selecting only the rows where the mean 
+
+low_genes_filtered <- subset_data_wide[apply(cpm(subset_data_wide), 1, function(x){!(sum(x < CPM_threshold) >= 1)}),] # If there is one sample or more with CPM < threshold then the gene is filtered out. 
+nrow(low_genes_filtered) # total genes after filtering
+(nrow(subset_data_wide)) - (nrow(low_genes_filtered)) # genes discarded. 
+((nrow(subset_data_wide)) - (nrow(low_genes_filtered)))/(nrow(subset_data_wide))*100 # % genes discarded. 
+(nrow(subset_data_wide))
+
+```
+# Fig. S18 A PCA
+```{r}
+# Create DGEList
+y <- DGEList(counts = low_genes_filtered, group = metadata$generation)
+
+pca <- y %>% 
+  cpm(log = TRUE) %>%
+    t() %>%
+    prcomp(center = TRUE, scale. = TRUE)
+
+pcaPlot <- as.data.frame(pca$x)
+# Label the generation group:
+pcaPlot$generation <- metadata$generation[match(rownames(pcaPlot), rownames(metadata))]
+# Compute variance explained:
+ve <- pca$sdev^2 / sum(pca$sdev^2)
+pcaPlot <- pcaPlot %>% relocate(generation, .before = PC1)
+# Reorder the levels of generation
+pcaPlot$generation <- factor(pcaPlot$generation, c("G0","G2", "G3","G4","G5",
+                                                   "G6","G7","G8","G9", "G10",
+                                                   "G11","G12","G13"))
+# Convert rownames into a column.
+pcaPlot <- cbind(sample = rownames(pcaPlot), pcaPlot)
+rownames(pcaPlot) <- 1:nrow(pcaPlot)
+# Label the replicates:
+pcaPlot$rep <- metadata$rep[match(pcaPlot$sample, metadata$rep)]
+pcaPlot <- pcaPlot %>% relocate(rep, .before = PC1)
+
+```
+
+```{r}
+# List of PCAs to be plotted:
+aesx_list <- c("PC1", "PC2", "PC3", "PC4", "PC5", "PC6","PC1","PC1","PC1")
+aesy_list <- c("PC2", "PC3", "PC4", "PC5", "PC6", "PC7","PC3","PC4","PC5")
+# List to store plots:
+plot_list <- list()
+
+for (i in seq_along(aesx_list)) {
+  
+  aesx <- aesx_list[i]
+  aesy <- aesy_list[i]
+  
+  # Extract numeric part for PCX and PCY:
+  PCX <- as.numeric(sub("PC", "", aesx))
+  PCY <- as.numeric(sub("PC", "", aesy))
+  
+  a <- plot_pca_label_rep(
+    dat = pcaPlot,
+    aesx = aesx,
+    aesy = aesy,
+    color = "generation",
+    mytitle = "",
+scale_color_set = scale_color_manual(
+          values = c("#B22222","darkblue", "blue", "darkcyan", "#438ec0",
+                     "cyan","darkgreen","green", "lightgreen","lightpink",
+                     "orange",  "yellow", "red")), 
+         shape_set = c(16,17,17,17,17,17,17,17,17,17,17,17,17,17),
+    PCX = PCX,
+    PCY = PCY)
+  #print(a)
+  plot_list[[i]] <- a
+  
+}
+  plot_list[[1]]+plot_list[[2]]+plot_list[[3]]+plot_list[[4]]+plot_list[[5]]+plot_list[[6]]+plot_list[[7]]+plot_list[[8]]+plot_list[[9]] + plot_layout(guides='collect')
+  
+```
+
+```{r}
+plot_df <- pcaPlot %>% dplyr::filter(generation %in% c("G0", "G2",  "G11", "G12", "G13"))
+
+# List of PCAs to be plotted:
+aesx_list <- c("PC1", "PC2", "PC3", "PC4", "PC5", "PC6","PC1","PC1","PC1")
+aesy_list <- c("PC2", "PC3", "PC4", "PC5", "PC6", "PC7","PC3","PC4","PC5")
+# List to store plots:
+plot_list <- list()
+
+for (i in seq_along(aesx_list)) {
+  
+  aesx <- aesx_list[i]
+  aesy <- aesy_list[i]
+  
+  # Extract numeric part for PCX and PCY:
+  PCX <- as.numeric(sub("PC", "", aesx))
+  PCY <- as.numeric(sub("PC", "", aesy))
+  
+  a <- plot_pca(
+    dat = plot_df,
+    aesx = aesx,
+    aesy = aesy,
+    color = "generation",
+    mytitle = "",
+scale_color_set = scale_color_manual(
+          values = c("#B22222", "darkblue", "orange","yellow","red")), 
+         shape_set = c(16,17,17,17,17),
+    PCX = PCX,
+    PCY = PCY)
+  #print(a)
+  plot_list[[i]] <- a
+  
+}
+  plot_list[[1]]+plot_list[[2]]+plot_list[[3]]+plot_list[[4]]+plot_list[[5]]+plot_list[[6]]+plot_list[[7]]+plot_list[[8]]+plot_list[[9]] + plot_layout(guides='collect')
+  
+```
+```{r}
+plot_df <- pcaPlot %>% dplyr::filter(generation %in% c("G0", "G9", "G11", "G12"))
+
+# List of PCAs to be plotted:
+aesx_list <- c("PC1", "PC2", "PC3", "PC4", "PC5", "PC6","PC1","PC1","PC1")
+aesy_list <- c("PC2", "PC3", "PC4", "PC5", "PC6", "PC7","PC3","PC4","PC5")
+# List to store plots:
+plot_list <- list()
+
+for (i in seq_along(aesx_list)) {
+  
+  aesx <- aesx_list[i]
+  aesy <- aesy_list[i]
+  
+  # Extract numeric part for PCX and PCY:
+  PCX <- as.numeric(sub("PC", "", aesx))
+  PCY <- as.numeric(sub("PC", "", aesy))
+  
+  a <- plot_pca(
+    dat = plot_df,
+    aesx = aesx,
+    aesy = aesy,
+    color = "generation",
+    mytitle = "",
+scale_color_set = scale_color_manual(
+          values = c("#B22222", "darkblue", "orange","yellow","red")), 
+         shape_set = c(16,17,17,17,17),
+    PCX = PCX,
+    PCY = PCY)
+  #print(a)
+  plot_list[[i]] <- a
+  
+}
+  plot_list[[1]]+plot_list[[2]]+plot_list[[3]]+plot_list[[4]]+plot_list[[5]]+plot_list[[6]]+plot_list[[7]]+plot_list[[8]]+plot_list[[9]] + plot_layout(guides='collect')
+
+```
+
+
+```{r}
+plot_df <- pcaPlot %>% dplyr::filter(generation %in% c("G0", "G7", "G13"))
+# List of PCAs to be plotted:
+aesx_list <- c("PC1", "PC2", "PC3", "PC4", "PC5", "PC6","PC1","PC1","PC1")
+aesy_list <- c("PC2", "PC3", "PC4", "PC5", "PC6", "PC7","PC3","PC4","PC5")
+# List to store plots:
+plot_list <- list()
+
+for (i in seq_along(aesx_list)) {
+  
+  aesx <- aesx_list[i]
+  aesy <- aesy_list[i]
+  
+  # Extract numeric part for PCX and PCY:
+  PCX <- as.numeric(sub("PC", "", aesx))
+  PCY <- as.numeric(sub("PC", "", aesy))
+  
+  a <- plot_pca(
+    dat = plot_df,
+    aesx = aesx,
+    aesy = aesy,
+    color = "generation",
+    mytitle = "",
+scale_color_set = scale_color_manual(
+          values = c("yellow", "orange",  "red")), 
+         shape_set = c(16,17,17,17,17),
+    PCX = PCX,
+    PCY = PCY)
+  #print(a)
+  plot_list[[i]] <- a
+  
+}
+  plot_list[[1]]+plot_list[[2]]+plot_list[[3]]+plot_list[[4]]+plot_list[[5]]+plot_list[[6]]+plot_list[[7]]+plot_list[[8]]+plot_list[[9]] + plot_layout(guides='collect')
+
+# Export plot:
+plot <- plot_list[[1]]
+#ggsave("short_sleep_PCA.svg", plot, units = "mm", height = 150, width = 150)
+
+```
+# Differential Expression Analysis:
+# Mix model with dream:
+### Create EList object with components:
+```{r}
+# Create EList object with components:
+dge <- new("EList", list(E = low_genes_filtered,
+                            genes = rownames(low_genes_filtered),
+                            samples = colnames(low_genes_filtered),
+                            metadata = metadata))
+dge
+str(dge)
+```
+# Specify the contrasts:
+```{r}
+
+form_dream <- ~ 0 + generation + (1 | rep)
+
+# As Marlies does: 
+L_0_2 <- getContrast(dge$E, form_dream, dge$metadata, c("generationG2","generationG0"))   # F7 - 0
+L_0_3 <- getContrast(dge$E, form_dream, dge$metadata, c("generationG3","generationG0"))   # F7 - 0
+L_0_4 <- getContrast(dge$E, form_dream, dge$metadata, c("generationG4","generationG0"))   # F7 - 0
+L_0_5 <- getContrast(dge$E, form_dream, dge$metadata, c("generationG5","generationG0"))   # F7 - 0
+L_0_6 <- getContrast(dge$E, form_dream, dge$metadata, c("generationG6","generationG0"))   # F7 - 0
+L_0_7 <- getContrast(dge$E, form_dream, dge$metadata, c("generationG7","generationG0"))   # F7 - 0
+L_0_8 <- getContrast(dge$E, form_dream, dge$metadata, c("generationG8","generationG0"))   # F7 - 0
+L_0_9 <- getContrast(dge$E, form_dream, dge$metadata, c("generationG9","generationG0"))   # F7 - 0
+L_0_10 <- getContrast(dge$E, form_dream, dge$metadata, c("generationG10","generationG0"))   # F7 - 0
+L_0_11 <- getContrast(dge$E, form_dream, dge$metadata, c("generationG11","generationG0"))   # F7 - 0
+L_0_12  <- getContrast(dge$E, form_dream, dge$metadata, c("generationG12","generationG0")) # F31 - base
+L_0_13  <- getContrast(dge$E, form_dream, dge$metadata, c("generationG13","generationG0"))   # F31 - F7
+L_7_13 <- getContrast(dge$E, form_dream, dge$metadata, c("generationG13","generationG7"))   # F7 - 0
+
+L <- cbind(L_0_2, L_0_3, L_0_4, L_0_5,L_0_6,L_0_7,L_0_8,L_0_9,L_0_10,L_0_11,L_0_12,L_0_13,L_7_13)
+#L <- cbind(L_0_7,L_0_13,L_7_13)
+L
+
+# Visualize contrast matrix
+plotContrasts(L)
+
+```
+# Fit the model:
+voomWithDreamWeights: 
+Transform count data to log2-counts per million (logCPM),
+estimate the mean-variance relationship and use this to compute appropriate
+observation-level weights. The data are then ready for linear mixed modelling
+with dream(). This method is the same as limma::voom(), except that it allows
+random effects in the formula
+```{r}
+rm(vobjDream)
+
+# The variable to be tested must be a fixed effect:
+form_dream <- ~ 0 + generation + (1 | rep) 
+
+# Estimate weights using linear mixed model of dream:
+vobjDream <- voomWithDreamWeights(dge$E, form_dream, dge$metadata)
+#a <- copy(vobjDream)
+
+# Fit the mixed model on each gene:
+vobjDream <- dream(exprObj = vobjDream,
+                   formula = form_dream,
+                                       data = dge$metadata,
+                                       useWeights = T,
+                                       L = L,
+                                       computeResiduals = TRUE,
+                                       quiet = F,
+                                       REML = F)
+
+
+```
+## eBayes:
+```{r}
+vobjDream_ebayes <- variancePartition::eBayes(vobjDream, robust=TRUE)
+
+```
+#Export model object:
+```{r}
+save(vobjDream_ebayes, file = "vobjDream_ebayes_DE_Short.RData")
+```
+# Adjust p-values:
+```{r}
+
+L_F0_F7 <- topTable(vobjDream_ebayes, coef = "L_0_7", n = nrow(low_genes_filtered), adjust.method = NULL)
+L_F0_F7$contrast <- "dream_F0_F7"
+L_F0_F7 <- L_F0_F7 %>% rownames_to_column(var = "gene_id")
+
+
+L_F0_F13 <- topTable(vobjDream_ebayes, coef = "L_0_13", n = nrow(low_genes_filtered))
+L_F0_F13$contrast <- "dream_F0_F13"
+L_F0_F13 <- L_F0_F13 %>% rownames_to_column(var = "gene_id")
+
+L_F7_F13 <- topTable(vobjDream_ebayes, coef = "L_7_13", n = nrow(low_genes_filtered))
+L_F7_F13$contrast <- "dream_F7_F13"
+L_F7_F13 <- L_F7_F13 %>% rownames_to_column(var = "gene_id")
+
+# Merge the data-sets and perform p-value adjustment across all tests:
+all_DE_results <- rbind(L_F0_F7,
+                        L_F0_F13,
+                        L_F7_F13)
+
+# Remove per group adjusted val:
+all_DE_results <- all_DE_results %>% dplyr::select("gene_id","logFC","AveExpr","t","P.Value","B","contrast")
+# Adjust p-values across all contrasts:
+all_DE_results$padj_fdr <- p.adjust(all_DE_results$P.Value, method = "fdr")
+
+all_DE_results %>%
+  group_by(contrast) %>%
+  summarise(num_significant_genes = sum(padj_fdr < 0.05))
+
+
+```
+### Quantify plateau genes:
+How many plateau genes do we find if we use 3 time points,
+as similar as possible to our experiment:
+
+Generation 0, Generation 7 and Generation 13. 
+```{r}
+# Prepare data-set:
+
+# Remove unnecessary columns:
+DE_results_dream_short <- all_DE_results %>% 
+  dplyr::select(c("gene_id","logFC", "contrast", "padj_fdr"))
+
+# From wide to long:
+DE_results_wide <- DE_results_dream_short %>%
+  pivot_wider(
+    names_from = contrast,
+    values_from = c(logFC, padj_fdr))
+
+# Change column names:
+colnames(DE_results_wide) <- c("gene_id", 
+                           "logFC_F7",
+                           "logFC_F13", 
+                           "logFC_F7_F13",
+                           "padj_F7", 
+                           "padj_F13",
+                           "padj_F7_F13")
+
+```
+
+```{r}
+# Classify genes:
+
+classify_df <- DE_results_wide
+
+# Set variables:
+alpha_tresh <- 0.05 # alpha tresshold for DEGs
+logFC_tresh <- 0    # log2FC tresshold for DEGs
+
+# Create a empty group column:
+classify_df$group <- "NA"
+
+# Define logical conditions:
+#
+non_significant <- classify_df$padj_F7 > alpha_tresh &
+  classify_df$padj_F13 > alpha_tresh &
+  classify_df$padj_F7_F13 > alpha_tresh
+#
+plateau_up <- classify_df$padj_F7 < alpha_tresh &
+  classify_df$padj_F13 < alpha_tresh &
+  classify_df$padj_F7_F13 > alpha_tresh &
+  classify_df$logFC_F13 > logFC_tresh
+#
+plateau_down <- classify_df$padj_F7 < alpha_tresh &
+  classify_df$padj_F13 < alpha_tresh &
+  classify_df$padj_F7_F13 > alpha_tresh &
+  classify_df$logFC_F13 < logFC_tresh
+#
+transitory_F7_F13 <- classify_df$padj_F7 > alpha_tresh &
+  classify_df$padj_F13 > alpha_tresh &
+  classify_df$padj_F7_F13 < alpha_tresh
+#
+F7_private_up <- classify_df$padj_F7 < alpha_tresh &
+  classify_df$padj_F13 > alpha_tresh &
+  classify_df$logFC_F7 > logFC_tresh
+#
+F7_private_down <- classify_df$padj_F7 < alpha_tresh &
+  classify_df$padj_F13 > alpha_tresh &
+  classify_df$logFC_F7 < logFC_tresh
+#
+F13_private_up <- classify_df$padj_F7 > alpha_tresh &
+  classify_df$padj_F13 < alpha_tresh &
+  classify_df$logFC_F13 > logFC_tresh
+#
+evolving_up <- classify_df$padj_F7 < alpha_tresh &
+  classify_df$padj_F13 < alpha_tresh &
+  classify_df$padj_F7_F13 < alpha_tresh &
+  ((classify_df$logFC_F7 > logFC_tresh &
+      classify_df$logFC_F13 > logFC_tresh) &
+     classify_df$logFC_F7 < classify_df$logFC_F13) 
+#
+reversed_up <- classify_df$padj_F7 < alpha_tresh &
+  classify_df$padj_F13 < alpha_tresh &
+  classify_df$padj_F7_F13 < alpha_tresh &
+  (classify_df$logFC_F7 > logFC_tresh &
+     classify_df$logFC_F7 > classify_df$logFC_F13)
+#
+F13_private_down <- classify_df$padj_F7 > alpha_tresh &
+  classify_df$padj_F13 < alpha_tresh &
+  classify_df$logFC_F13 < logFC_tresh
+#
+evolving_down <- classify_df$padj_F7 < alpha_tresh &
+  classify_df$padj_F13 < alpha_tresh &
+  classify_df$padj_F7_F13 < alpha_tresh &
+  ((classify_df$logFC_F7 < logFC_tresh &
+      classify_df$logFC_F13 < logFC_tresh) &
+     classify_df$logFC_F7 > classify_df$logFC_F13)
+#
+reversed_down <- classify_df$padj_F7 < alpha_tresh &
+  classify_df$padj_F13 < alpha_tresh &
+  classify_df$padj_F7_F13 < alpha_tresh &
+  (classify_df$logFC_F7 < logFC_tresh &
+  classify_df$logFC_F7 < classify_df$logFC_F13)
+
+##
+# Apply conditions to the data-set:
+classify_df$group[non_significant] <- "non_significant"
+classify_df$direction[non_significant] <- "none"
+classify_df$group[plateau_up] <- "plateau"
+classify_df$direction[plateau_up] <- "up"
+classify_df$group[plateau_down] <- "plateau"
+classify_df$direction[plateau_down] <- "down"
+classify_df$group[transitory_F7_F13] <- "transitory_F7_F13"
+classify_df$direction[transitory_F7_F13] <- "none"
+classify_df$group[F7_private_up] <- "complete_reversed"
+classify_df$direction[F7_private_up] <- "up"
+classify_df$group[F7_private_down] <- "complete_reversed"
+classify_df$direction[F7_private_down] <- "down"
+classify_df$group[F13_private_up] <- "late_response"
+classify_df$direction[F13_private_up] <- "up"
+classify_df$group[evolving_up] <- "monotonic"
+classify_df$direction[evolving_up] <- "up"
+classify_df$group[reversed_up] <- "incomplete_reversed"
+classify_df$direction[reversed_up] <- "up"
+classify_df$group[F13_private_down] <- "late_response"
+classify_df$direction[F13_private_down] <- "down"
+classify_df$group[evolving_down] <- "monotonic"
+classify_df$direction[evolving_down] <- "down"
+classify_df$group[reversed_down] <- "incomplete_reversed"
+classify_df$direction[reversed_down] <- "down"
+
+
+# Check the genes per group:
+table(classify_df$group, classify_df$direction)
+
+# Include full group variable:
+classify_df$full_group <- paste(classify_df$group, classify_df$direction, sep = "_")
+classify_df <- classify_df %>% dplyr::relocate(full_group, .after = direction)
+
+# Format variables:
+classify_df$group <- as.factor(classify_df$group)
+classify_df$full_group <- as.factor(classify_df$full_group)
+
+# Arrange levels of group:
+classify_df$group <-  factor(classify_df$group,
+                             levels = c("non_significant",
+                                        "plateau", 
+                                        "monotonic", 
+                                        "incomplete_reversed", 
+                                        "complete_reversed", 
+                                        "late_response", 
+                                        "transitory_F7_F13"))
+
+
+```
+# Fig. S18 B Pie chart with proportion of DEGs:
+```{r}
+classify_df %>% ggplot(aes(x=group)) +
+  geom_bar() +
+  theme_classic() 
+
+## First remove non_significant genes:
+filt_df <- classify_df %>%
+  dplyr::filter(!group %in% c("non_significant","transitory_F7_F13"))
+
+
+filt_df$group <- factor(filt_df$group, levels = c("plateau",
+                                                  "monotonic",
+                                                  "incomplete_reversed",
+                                                  "complete_reversed",
+                                                  "late_response"))
+manual_palette <- c(color_plateau,
+                    color_monotonic,
+                    color_incomplete_reversed,
+                    color_complete_reversed,
+                    color_late_response)                                                  
+
+# Donut chart
+donutchart <- PieChart(group,
+                       data = filt_df,
+                       main = NULL,
+                       labels_size = 1.3,
+                       fill = manual_palette)
+
+
+
+```
+
+--- END ---

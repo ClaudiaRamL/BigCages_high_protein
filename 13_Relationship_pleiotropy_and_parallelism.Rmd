@@ -1,0 +1,395 @@
+---
+title: "High-Protein BigCages - relationship of pleiotropy and parallelism"
+Author: "Claudia Ramirez-lanzas"
+Date: "16/01/2025"
+---
+
+# Load libraries:
+```{r}
+# Data handling:
+library("readxl") 
+library("writexl") 
+library("tidyverse")
+
+# Plotting:
+library("ggplot2") 
+library("svglite") # plotting
+library("patchwork") 
+library("gridExtra")
+library("ggpubr") # add p-values to plots
+library("khroma") # plotting colour blind safe
+
+```
+# Check sessionInfo:
+```{r}
+sessionInfo()
+```
+# Set-up colors:
+```{r}
+bright <- color("bright")
+plot_scheme(bright(6), colours = TRUE, names = TRUE, size = 0.9)
+#
+muted <- color("muted")
+plot_scheme(muted(9), colours = TRUE, names = TRUE, size = 0.9)
+
+color_plateau <- muted(9)[2] #"#332288"
+color_monotonic <- muted(9)[7] #"#44AA99"
+#color_late_response <-  muted(9)[3] #"#DDCC77"
+color_late_response <-  "#D4AF37"
+color_incomplete_reversed <- muted(9)[9] #"#AA4499"
+color_complete_reversed <- muted(9)[5] #"#88CCEE" 
+color_shared <- muted(9)[1] #"#CC6677" 
+
+plot_scheme(muted(9)[2], colours = TRUE, names = TRUE, size = 0.9)
+plot_scheme(muted(9)[7], colours = TRUE, names = TRUE, size = 0.9)
+plot_scheme(muted(9)[9], colours = TRUE, names = TRUE, size = 0.9)
+plot_scheme(muted(9)[3], colours = TRUE, names = TRUE, size = 0.9)
+plot_scheme(muted(9)[5], colours = TRUE, names = TRUE, size = 0.9)
+plot_scheme(muted(9)[1], colours = TRUE, names = TRUE, size = 0.9)
+
+
+```
+# Import files:
+```{r}
+connectivity_df <- read_csv("input_files/connectivity_per_gene.csv",  show_col_types = FALSE)
+
+tau_df <- read_csv("input_files/oneminusTau_per_gene.csv",  show_col_types = FALSE)
+
+shared_upset_data <- read_csv("input_files/shared_upset_data.csv", show_col_types = FALSE)
+
+DE_rep_wise_results <- read_csv("input_files/DE_repwise_results.csv", show_col_types = FALSE)
+
+```
+
+* connectivity_df : contains gene-wise information about the log2FC at each
+generation, the transcriptomic group and also the connectivity value. This dataset 
+was generated in 12_pleiotropy
+
+* tau_df : contains gene-wise information about the log2FC at each generation,
+the transcriptomic group and also the 1-Tau (called tau) value. This dataset 
+was generated in 12_pleiotropy
+
+* shared_upset_data: contains the data-set used to make the UpSet plots.
+It contains information about the DEGs detected in the replicate specific DE
+analysis. That is, each replicate was compared to the Base and the DEGs were
+compared to the other 5 replicates leading to 6 categories of parallelism
+(ranging from 1 (private DEGs) to 6 (shared by all replicates)).
+
+* DE_rep_wise_results: contains the results of DE analysis using dream model. 
+6 independent modeles, one per replicate. Including 3 generations.
+Each replicated had 3 samples. P-values corrected across all contrasts and replicates. 
+
+# Create parallel_pleio_df:
+```{r}
+
+# Subset Background genes (all genes with connectivity information):
+background_conn <- connectivity_df %>% dplyr::filter(group == "background")
+# Include connectivity to the parallelism data:
+parallel_pleio_df <- full_join(shared_upset_data, background_conn, by = "gene_id")
+
+# Include tau to the parallelism data:
+
+# Subset Background genes (all genes with connectivity information):
+background_tau <- tau_df %>% dplyr::filter(group == "background")
+background_tau <- background_tau %>% dplyr::select(gene_id, tau)
+parallel_pleio_df <- left_join(parallel_pleio_df, background_tau, by = "gene_id")
+
+
+# Keep only genes with concordant changes across all replicates:
+# Label Concordant and Non_concordant_genes:
+DE_rep_specific_DEGs <- DE_rep_wise_results %>%
+  mutate(generation = case_when(grepl("F7", contrast) ~ "gen7",
+                                grepl("F31", contrast) ~ "gen31")) %>%
+  dplyr::filter(padj_fdr < 0.05)
+concordant_DEGs <- DE_rep_specific_DEGs %>% group_by(generation,gene_id) %>%
+  mutate(
+    concordance = ifelse(all(sign(logFC) == 1) | all(sign(logFC) == -1),
+                         "concordant", "non-concordant")) %>% ungroup()
+concordant_DEGs <- concordant_DEGs %>% dplyr::filter(concordance == "concordant")
+table(concordant_DEGs$concordance)
+
+# Keep only concordant genes:
+parallel_pleio_df <- parallel_pleio_df %>% dplyr::filter(gene_id %in% concordant_DEGs$gene_id)
+
+# Remove private genes:
+parallel_pleio_df <- parallel_pleio_df %>% dplyr::filter(rep_count != 1)
+
+```
+
+
+# Part 1: Correlation between pleiotropy and parallellism - using only replicate especific DE dataset
+Here we correlate gene-wise pleiotropic levels with gene-wise parallelism levels.
+Here we exclude private DEGs -> those DEGs found in 1 replicate
+Here we exclude non-concordant DEGs <- those with different signs (log2FC) across at least 1 replicate.
+
+# Plot 1
+```{r}
+parallel_pleio_df %>% ggplot(aes(y=log10_connectivity, x=factor(rep_count), fill=factor(rep_count))) +
+  geom_boxplot() +
+  scale_fill_manual(values =c("#fdd49e","#fc8d59","#ef6548","#d7301f","#7f0000")) +
+  ylab(bquote(log[10]*(connectivity))) +
+  xlab("Parallelism (No of replicates with expression changes)") +
+  theme_classic() +
+  theme(
+    axis.title = element_text(size = 14),
+    axis.ticks = element_line(color="black"),
+    axis.text = element_text(size = 14, color = "black"),
+    plot.background = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    legend.position ="none",
+    panel.border = element_rect(colour = "black",
+                                fill=NA,
+                                linewidth=0.5)) +
+  facet_wrap(~generation)
+
+
+
+##
+
+
+connec_parallel_plot <- parallel_pleio_df %>% ggplot(aes(y=log10_connectivity, x=factor(rep_count), fill=factor(rep_count))) +
+  geom_violin() +
+  geom_boxplot(fill = "white", width=0.2, color="black", alpha=0.4, outlier.size = 0) +
+  scale_fill_manual(values =c("#fdd49e","#fc8d59","#ef6548","#d7301f","#7f0000")) +
+  ylab(bquote(log[10]*(connectivity))) +
+  xlab("Parallelism (No of replicates with expression changes)") +
+  theme_classic() +
+  theme(
+    axis.title = element_text(size = 14),
+    axis.ticks = element_line(color="black"),
+    axis.text = element_text(size = 14, color = "black"),
+    strip.text.x.top = element_text(colour="black", face = "bold", size = 16),
+    plot.background = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    legend.position ="none",
+    panel.border = element_rect(colour = "black",
+                                fill=NA,
+                                linewidth=0.5),
+    strip.background = element_rect(colour="white",fill="white")) +
+  facet_wrap(~ generation, labeller = labeller(generation = 
+    c("gen07" = "Generation 7",
+      "gen31" = "Generation 31"))) 
+
+connec_parallel_plot
+
+# Export plot:
+
+#ggsave("output_files/plots/Pleiotropy/corr_conn_parallelism.svg", connec_parallel_plot, units = "mm", width = 200, height = 100)
+
+```
+# Plot 2
+```{r}
+parallel_pleio_df %>% ggplot(aes(y=tau, x=factor(rep_count), fill=factor(rep_count))) +
+  geom_boxplot() +
+  #geom_violin() +
+  scale_fill_manual(values =c("#fdd49e","#fc8d59","#ef6548","#d7301f","#7f0000")) +
+  ylab("1-Tau") +
+  xlab("Parallelism (No of replicates with expression changes)") +
+  theme_classic() +
+  theme(
+    axis.title = element_text(size = 14),
+    axis.ticks = element_line(color="black"),
+    axis.text = element_text(size = 14, color = "black"),
+    plot.background = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    legend.position ="none",
+    panel.border = element_rect(colour = "black",
+                                fill=NA,
+                                linewidth=0.5)) +
+  facet_wrap(~generation) 
+
+##
+
+tau_parallel_plot <- parallel_pleio_df %>% ggplot(aes(y=tau, x=factor(rep_count), fill=factor(rep_count))) +
+  #geom_boxplot() +
+  geom_violin() +
+  geom_boxplot(fill = "white", width=0.2, color="black", alpha=0.4, outlier.size = 0) +
+  scale_fill_manual(values =c("#fdd49e","#fc8d59","#ef6548","#d7301f","#7f0000")) +
+  ylab("1-Tau") +
+  xlab("Parallelism (No of replicates with expression changes)") +
+  theme_classic() +
+  theme(
+    axis.title = element_text(size = 14),
+    axis.ticks = element_line(color="black"),
+    axis.text = element_text(size = 14, color = "black"),
+    strip.text.x.top = element_text(colour="black", face = "bold", size = 16),
+    plot.background = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    legend.position ="none",
+    panel.border = element_rect(colour = "black",
+                                fill=NA,
+                                linewidth=0.5),
+    strip.background = element_rect(colour="white",fill="white")) +
+  facet_wrap(~ generation, labeller = labeller(generation = 
+    c("gen07" = "Generation 7",
+      "gen31" = "Generation 31"))) 
+
+tau_parallel_plot
+
+# Export plot:
+
+#ggsave("output_files/plots/Pleiotropy/corr_tau_parallelism.svg", tau_parallel_plot, units = "mm", width = 200, height = 100)
+
+```
+
+# Wilkoxon tests - Connectivity 5 groups
+```{r}
+#### GENERATION 7:
+# Filter F7:
+connec_paralell_df_F7 <- parallel_pleio_df %>% dplyr::filter(generation == "gen07")
+# Remove genes with no connectivity information:
+connec_paralell_df_F7 <- connec_paralell_df_F7[!is.na(connec_paralell_df_F7$connectivity),]
+
+wilcox_conn <- pairwise.wilcox.test(connec_paralell_df_F7$log10_connectivity, 
+                                         connec_paralell_df_F7$rep_count, 
+                                         p.adjust.method = "none")
+# Results into a data-frame:
+wilcox_test_df <- wilcox_conn$p.value
+wilcox_test_df <- data.frame(expand.grid(dimnames(wilcox_test_df)), array(wilcox_test_df)) %>% na.omit()
+colnames(wilcox_test_df) <- c("group1", "group2", "p_value")
+wilcox_test_df$p_value <- as.numeric(wilcox_test_df$p_value)
+# include generation:
+wilcox_test_df$generation <- "Gen 7"
+# Remove non-desired contrasts:
+wilcox_test_df$contrast <- paste(wilcox_test_df$group1, wilcox_test_df$group2, sep=" VS ")
+export_df_F7 <- wilcox_test_df %>% dplyr::filter(!contrast %in% c("plateau VS shared",
+                                                "monotonic VS shared",
+                                                "incomplete_reversed VS shared"))
+####Generation 31
+
+# Filter F7:
+connec_paralell_df_F31 <- parallel_pleio_df %>% dplyr::filter(generation == "gen31")
+# Remove genes with no connectivity information:
+connec_paralell_df_F31 <- connec_paralell_df_F31[!is.na(connec_paralell_df_F31$connectivity),]
+
+wilcox_conn <- pairwise.wilcox.test(connec_paralell_df_F31$log10_connectivity, 
+                                         connec_paralell_df_F31$rep_count, 
+                                         p.adjust.method = "none")
+# Results into a data-frame:
+wilcox_test_df <- wilcox_conn$p.value
+wilcox_test_df <- data.frame(expand.grid(dimnames(wilcox_test_df)), array(wilcox_test_df)) %>% na.omit()
+colnames(wilcox_test_df) <- c("group1", "group2", "p_value")
+wilcox_test_df$p_value <- as.numeric(wilcox_test_df$p_value)
+# include generation:
+wilcox_test_df$generation <- "Gen 31"
+# Remove non-desired contrasts:
+wilcox_test_df$contrast <- paste(wilcox_test_df$group1, wilcox_test_df$group2, sep=" VS ")
+export_df_F31 <- wilcox_test_df %>% dplyr::filter(!contrast %in% c("plateau VS shared",
+                                                "monotonic VS shared",
+                                                "incomplete_reversed VS shared"))
+
+combined_conn_rep_wise_parallel_df <- rbind(export_df_F7, export_df_F31)
+
+
+# Multiple test correction - FDR across 20 tests
+combined_conn_rep_wise_parallel_df$padj_fdr <- p.adjust(combined_conn_rep_wise_parallel_df$p_value, method = "fdr", n = length(combined_conn_rep_wise_parallel_df$p_value))
+# Include asterisks:
+combined_conn_rep_wise_parallel_df <- combined_conn_rep_wise_parallel_df %>%
+  mutate(significance = case_when(
+    padj_fdr >= 0.05 ~ "n.s",          
+    padj_fdr < 0.05 & padj_fdr > 0.01 ~ "*",  
+    padj_fdr <= 0.01 & padj_fdr > 0.001 ~ "**", 
+    padj_fdr <= 0.001 & padj_fdr > 0.0001 ~ "***" ,
+    padj_fdr < 0.0001 ~ "****"))
+combined_conn_rep_wise_parallel_df$padj_Bonferroni <- format(combined_conn_rep_wise_parallel_df$padj_Bonferroni, scientific = TRUE, digits = 2)
+# Export test results:
+combined_conn_rep_wise_parallel_df$test <- "Wilcoxson rank sum test, two tailed"
+# Include tested variable:
+combined_conn_rep_wise_parallel_df$variable <- "log10(connectivity)"
+combined_conn_rep_wise_parallel_df <- combined_conn_rep_wise_parallel_df %>% dplyr::select("variable","generation","contrast","p_value",
+                         "padj_fdr","significance",
+                         "test")
+colnames(combined_conn_rep_wise_parallel_df) <- c("variable","generation","contrast" ,"p_value",
+                         "padj_fdr","significancy_fdr","test")
+
+
+```
+
+# Wilkoxon tests - Tau 5 groups
+```{r}
+#### GENERATION 7:
+
+# Filter F7:
+tau_paralell_df_F7 <- parallel_pleio_df %>% dplyr::filter(generation == "gen07")
+# Remove genes with no tau information:
+tau_paralell_df_F7 <- tau_paralell_df_F7[!is.na(tau_paralell_df_F7$tau),]
+
+wilcox_tau <- pairwise.wilcox.test(tau_paralell_df_F7$tau, 
+                                         tau_paralell_df_F7$rep_count, 
+                                         p.adjust.method = "none")
+# Results into a data-frame:
+wilcox_test_df <- wilcox_tau$p.value
+wilcox_test_df <- data.frame(expand.grid(dimnames(wilcox_test_df)), array(wilcox_test_df)) %>% na.omit()
+colnames(wilcox_test_df) <- c("group1", "group2", "p_value")
+wilcox_test_df$p_value <- as.numeric(wilcox_test_df$p_value)
+# include generation:
+wilcox_test_df$generation <- "Gen 7"
+# Remove non-desired contrasts:
+wilcox_test_df$contrast <- paste(wilcox_test_df$group1, wilcox_test_df$group2, sep=" VS ")
+export_df_F7 <- wilcox_test_df %>% dplyr::filter(!contrast %in% c("plateau VS shared",
+                                                "monotonic VS shared",
+                                                "incomplete_reversed VS shared"))
+
+####Generation 31
+
+# Filter F31:
+tau_paralell_df_F31 <- parallel_pleio_df %>% dplyr::filter(generation == "gen31")
+# Remove genes with no tau information:
+tau_paralell_df_F31 <- tau_paralell_df_F31[!is.na(tau_paralell_df_F31$tau),]
+
+wilcox_tau <- pairwise.wilcox.test(tau_paralell_df_F31$tau, 
+                                         tau_paralell_df_F31$rep_count, 
+                                         p.adjust.method = "none")
+# Results into a data-frame:
+wilcox_test_df <- wilcox_tau$p.value
+wilcox_test_df <- data.frame(expand.grid(dimnames(wilcox_test_df)), array(wilcox_test_df)) %>% na.omit()
+colnames(wilcox_test_df) <- c("group1", "group2", "p_value")
+wilcox_test_df$p_value <- as.numeric(wilcox_test_df$p_value)
+# include generation:
+wilcox_test_df$generation <- "Gen 31"
+# Remove non-desired contrasts:
+wilcox_test_df$contrast <- paste(wilcox_test_df$group1, wilcox_test_df$group2, sep=" VS ")
+export_df_F31 <- wilcox_test_df %>% dplyr::filter(!contrast %in% c("plateau VS shared",
+                                                "monotonic VS shared",
+                                                "incomplete_reversed VS shared"))
+
+
+combined_tau_rep_wise_parallel_df <- rbind(export_df_F7, export_df_F31)
+
+# Multiple test correction - FDR across 20 tests
+combined_tau_rep_wise_parallel_df$padj_fdr <- p.adjust(combined_tau_rep_wise_parallel_df$p_value, method = "fdr", n = length(combined_tau_rep_wise_parallel_df$p_value))
+# Include asterisks:
+combined_tau_rep_wise_parallel_df <- combined_tau_rep_wise_parallel_df %>%
+  mutate(significance = case_when(
+    padj_fdr >= 0.05 ~ "n.s",          
+    padj_fdr < 0.05 & padj_fdr > 0.01 ~ "*",  
+    padj_fdr <= 0.01 & padj_fdr > 0.001 ~ "**", 
+    padj_fdr <= 0.001 & padj_fdr > 0.0001 ~ "***" ,
+    padj_fdr < 0.0001 ~ "****"))
+combined_tau_rep_wise_parallel_df$padj_fdr <- format(combined_tau_rep_wise_parallel_df$padj_fdr, scientific = TRUE, digits = 2)
+# Export test results:
+combined_tau_rep_wise_parallel_df
+combined_tau_rep_wise_parallel_df$test <- "Wilcoxson rank sum test, two tailed"
+# Include tested variable:
+combined_tau_rep_wise_parallel_df$variable <- "1-Tau"
+combined_tau_rep_wise_parallel_df <- combined_tau_rep_wise_parallel_df %>% dplyr::select("variable","generation","contrast","p_value",
+                         "padj_fdr","significance",
+                         "test")
+colnames(combined_tau_rep_wise_parallel_df) <- c("variable","generation","contrast" ,"p_value",
+                         "padj_fdr","significancy_fdr","test")
+
+```
+
+# Export tests results:
+```{r}
+export_df <- rbind(combined_tau_rep_wise_parallel_df, combined_conn_rep_wise_parallel_df)
+
+#write_xlsx(export_df, "output_files/S7_wilcox_test_pleiotropy_and_parallellism")
+
+```
+
+--- END ---

@@ -1,0 +1,1116 @@
+---
+title: "High-Protein BigCages - pleiotropy contribution to transcriptomic response"
+Author: "Claudia Ramirez-lanzas"
+Date: "27/05/2024"
+---
+
+# Load libraries:
+```{r}
+# Data handling:
+library("readxl") 
+library("writexl") 
+library("tidyverse")
+
+# Plotting:
+library("ggplot2") 
+library("svglite") # plotting
+library("patchwork") 
+library("gridExtra")
+library("ggpubr") # add p-values to plots
+library("khroma") # plotting colour blind safe
+library("ggtext")
+library("ggdist")
+library("glue")
+library("tidytext")
+
+
+```
+# Check sessionInfo:
+```{r}
+sessionInfo()
+
+```
+# Set-up colors:
+```{r}
+bright <- color("bright")
+plot_scheme(bright(6), colours = TRUE, names = TRUE, size = 0.9)
+#
+muted <- color("muted")
+plot_scheme(muted(9), colours = TRUE, names = TRUE, size = 0.9)
+
+color_plateau <- muted(9)[2] #"#332288"
+color_monotonic <- muted(9)[7] #"#44AA99"
+#color_late_response <-  muted(9)[3] #"#DDCC77"
+color_late_response <-  "#D4AF37"
+color_incomplete_reversed <- muted(9)[9] #"#AA4499"
+color_complete_reversed <- muted(9)[5] #"#88CCEE" 
+color_shared <- muted(9)[1] #"#CC6677" 
+
+plot_scheme(muted(9)[2], colours = TRUE, names = TRUE, size = 0.9)
+plot_scheme(muted(9)[7], colours = TRUE, names = TRUE, size = 0.9)
+plot_scheme(muted(9)[9], colours = TRUE, names = TRUE, size = 0.9)
+plot_scheme(muted(9)[3], colours = TRUE, names = TRUE, size = 0.9)
+plot_scheme(muted(9)[5], colours = TRUE, names = TRUE, size = 0.9)
+plot_scheme(muted(9)[1], colours = TRUE, names = TRUE, size = 0.9)
+
+
+```
+# Import files:
+```{r}
+
+tau_flyatlas2 <- read_csv("input_files/tau_flyatlas2_FKM_male.csv", show_col_types = FALSE) 
+
+drosophila_network <- read.table("input_files/flynet_supervised_0.6.txt") 
+
+classify_trajectories <- read_csv("input_files/classify_trajectories_df.csv", show_col_types = FALSE)
+
+```
+
+
+* tau_flyatlas2: contains the indices of tissue specificity computed
+following (Yanai et al., Bioinformatics, 2005) using flyAtlas2 data-set.
+
+* drosophila_network: contains ~300,000 edges of a supervised integrative gene
+regulatory network of Drosophila melanogaster from
+(Marbach et. al., Genome Research, 2012). It contains 3 columns:
+V1: name of the regulator gene
+V2: name of the target gene
+V3: score of the edge connecting the regulator and the target
+
+* classify_trajectories: contains all genes classified by transcriptomic trajectory.
+
+# # Part 1: create onnectivity dataset:
+## Prepare the data-set:
+The out-degree distribution is determined by the number
+of promoters bounded by a transcription factor.
+
+The in-degree distribution is determined by the number
+of transcription factors that bind a promoter.
+
+They follow a power-law distribution with fewer genes having many connections. 
+## Compute out-degree connections:
+```{r}
+# Subset unique gene_ids:
+unique_ind <- unique(drosophila_network$V1)
+# Create an empty matrix:
+out_degree <- as.data.frame(matrix(NA, length(unique_ind), 2))
+# Introduce promoters ids:
+out_degree[, 1] <- as.character(unique(drosophila_network$V1))
+# Compute connections for each gene:
+for (i in 1:length(unique_ind)) {
+  out_degree[i, 2] = sum(drosophila_network$V1 == unique_ind[i])
+}
+
+# Rename column names:
+colnames(out_degree) <- c("FBgn","out_de")
+hist(as.numeric(paste(out_degree[, 2])))
+
+```
+## Compute out-degree connections:
+```{r}
+# Subset unique gene_ids:
+unique_out <- unique(drosophila_network$V2)
+# Create an empty matrix:
+in_degree <- as.data.frame(matrix(NA,length(unique_out),2))
+# Introduce promoters ids:
+in_degree[,1] <- as.character(unique(drosophila_network$V2))
+# Compute connections for each gene:
+for (i in 1:length(unique_out)) {
+  in_degree[i,2] = sum(drosophila_network$V2==unique_out[i])
+}
+# Rename column names:
+colnames(in_degree) <- c("FBgn","in_de")
+hist(as.numeric(paste(in_degree[,2])))
+
+```
+## Merge in-degree and out-degree connections: 
+```{r}
+in_out_df <- merge(in_degree, out_degree, by = "FBgn", all = T)
+#sum(is.na(in_out_df$in_degree))
+#sum(is.na(in_out_df$out_de))
+
+# NA set as 0 connectivity:
+in_out_df[which(is.na(in_out_df$out_de)), 3] <- 0 # 0 connections
+in_out_df[which(is.na(in_out_df$in_de)), 2] <- 0 # 0 connections
+
+# Connectivity as the sum of in-degree and out-degree connections:
+in_out_df$conn <- in_out_df$in_de + in_out_df$out_de 
+
+```
+## Create connectivity dataset: 
+```{r}
+# Subset gene_id and connectivity columns:
+connectivity_df <- in_out_df[,c(1,4)]
+colnames(connectivity_df) <-  c("gene_id","connectivity")
+# Introduce gene_id as row names:
+row.names(connectivity_df) <- connectivity_df$gene_id
+# Order data-set according to gene_id:
+connectivity_df <- connectivity_df[order(connectivity_df$gene_id), ]
+# Compute log10_connectivity
+connectivity_df$log10_connectivity <- log10(connectivity_df$connectivity)
+
+```
+## Plot connectivity distribution:
+```{r}
+connectivity_df %>% ggplot(aes(x=log10_connectivity)) +
+  geom_histogram(bins = 20,
+                 color="black",
+                 fill="white",
+                 size = 1.5) +
+  theme_classic() +
+  xlab("log10(connectivity)") +
+  theme(axis.text.x = element_text(size=15),
+        axis.text.y = element_text(size=15),  
+        axis.title.x = element_text(size=20),
+        axis.title.y = element_text(size=20)) 
+
+
+
+```
+0 = 1 edge
+1 = 10 edges
+2 = 100 edges
+3 = 1000 edges
+
+Connectivity follows a power-law distribution, as in-degree 
+and out-degree distributions.
+
+# # Part 1.2: Connectivity distribution in DEGs:
+## Prepare data-sets - DEGs and background
+```{r}
+
+## All genes:
+connectivity_all_genes <- dplyr::left_join(classify_trajectories,
+                                           connectivity_df, by = "gene_id")
+# Label transitory_F7_F31 as non-significant:
+connectivity_all_genes <- connectivity_all_genes %>%
+  dplyr::mutate(group = case_when(group == "transitory_F7_F31" ~ "non_significant", TRUE ~ group))
+connectivity_all_genes <- connectivity_all_genes %>%
+  dplyr::mutate(full_group = case_when(full_group == "transitory_F7_F31_none" ~ "non_significant_none", TRUE ~ full_group))
+# Show total number of genes with connectivity information:
+print("Some genes discarded because they lack connectivity information (TRUE):")
+table(connectivity_all_genes$group, is.na(connectivity_all_genes$connectivity))
+# Remove genes without connectivity information:
+connectivity_all_genes <- connectivity_all_genes %>% drop_na()
+
+## Background - all expressed genes:
+connectivity_background <- connectivity_all_genes 
+connectivity_background$group <- "background"
+
+## DEGs:
+connectivity_DEGs <- connectivity_all_genes %>% dplyr::filter(group != "non_significant")
+
+## Non-significant genes:
+connectivity_non_significant <- connectivity_all_genes %>% dplyr::filter(group == "non_significant")
+  
+# All groups + background 
+connectivity_groups_df <- rbind(connectivity_all_genes, connectivity_background)
+
+# DEG groups + background 
+connectivity_DEGs_and_background_df <- rbind(connectivity_DEGs, connectivity_background)
+connectivity_DEGs_and_background_df$abs_logFC_F7 <- abs(connectivity_DEGs_and_background_df$logFC_F7)
+connectivity_DEGs_and_background_df$abs_logFC_F31 <- abs(connectivity_DEGs_and_background_df$logFC_F31)
+
+# DEGs vs Non-significant:
+connectivity_DEGs_and_nonDEGs <- rbind(connectivity_DEGs, connectivity_non_significant)
+connectivity_DEGs_and_nonDEGs <- connectivity_DEGs_and_nonDEGs %>%
+  dplyr::mutate(group = case_when(group != "non_significant" ~ "DEGs", TRUE ~ "Non-DEGs"))
+table(connectivity_DEGs_and_nonDEGs$group)
+
+```
+## Export connectivity_groups_df:
+```{r}
+export_df <- connectivity_groups_df
+
+#write_csv(export_df, "input_files/connectivity_per_gene.csv")
+#write_csv(export_df, "output_files/connectivity_per_gene.csv")
+
+```
+## Summary genes with connectivity values in GRN:
+```{r}
+connect_0 <- nrow(connectivity_background %>% dplyr::filter(connectivity == 0))
+connect_1 <- nrow(connectivity_background %>% dplyr::filter(connectivity == 1))
+connect_more_1 <- nrow(connectivity_background %>% dplyr::filter(connectivity > 1))
+
+
+print("Total genes with connectivity value in the GRN:")
+nrow(connectivity_background)
+print("Genes with 0 connection in the GRN:")
+connect_0
+print("Genes with 1 connection in the GRN:")
+connect_1
+print("Genes with > 1 connection in the GRN:")
+connect_more_1
+
+```
+# Boxplots per group:
+```{r}
+
+connectivity_groups_df$group <- factor(connectivity_groups_df$group,
+                                        levels = c("background",
+                                                   "non_significant",
+                                                   "complete_reversed",
+                                                   "late_response",
+                                                      "incomplete_reversed",
+                                                   "plateau",
+                                                   "monotonic"))
+
+connectivity_groups_df %>% 
+  ggplot(aes(x = group, y = log10_connectivity, color = group)) + 
+  geom_boxplot(linewidth = 1) +  
+  ylab(bquote(log[10](connectivity))) + 
+  theme_light() + 
+  scale_color_manual(values = c( "black","grey",
+                               color_complete_reversed,
+                               color_late_response,
+                               color_plateau,
+                               color_incomplete_reversed,
+                               color_monotonic),
+                     labels = c("Background","Non-significant", "Complete-reverse", "Late-response",
+                                "Plateau", "Incomplete-reverse",
+                                "Monotonic"), name="") +
+  theme(
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(size = 13),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.ticks.y = element_line(color="black"),
+    axis.text.y = element_text(size = 13, color = "black"),
+    plot.background = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    legend.position="bottom",
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 10),
+    strip.background=element_rect(colour="white",
+                                    fill="white"),
+    panel.border = element_rect(colour = "black",
+                                fill=NA, linewidth=0.5))
+
+
+# Save the plot:
+#ggsave("output_files/plots/pleiotropy/connectivity_boxplots_7_groups.svg", last_plot(),
+       #width = 120,
+       #height = 110,
+       #units = "mm",
+       #dpi = 300)
+
+```
+# Boxplots per group - 5 groups
+```{r}
+
+connectivity_DEGs$group <- factor(connectivity_DEGs$group,
+                                        levels = c("complete_reversed",
+                                                   "late_response",
+                                                   "incomplete_reversed",
+                                                   "plateau",
+                                                   "monotonic"))
+
+connectivity_DEGs$direction <- as.factor(connectivity_DEGs$direction)
+
+connectivity_DEGs %>% 
+  ggplot(aes(x = group, y = log10_connectivity, fill = group)) + 
+  geom_violin(linewidth = 0) +
+  geom_boxplot(fill = "white", width=0.2, color="black", alpha=0.4, outlier.size = 0) +
+  ylab(bquote(log[10](connectivity))) + 
+  theme_classic() +
+  scale_fill_manual(values = c(
+                               color_complete_reversed,
+                               color_late_response,
+                               color_incomplete_reversed,
+                               color_plateau,
+                               color_monotonic),
+                     labels = c("Complete-reverse",
+                                "Late-response",
+                                "Incomplete-reverse",
+                                "Plateau",
+                                "Monotonic"), name="") +
+  theme(
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(size = 13),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.ticks.y = element_line(color="black"),
+    axis.text.y = element_text(size = 13, color = "black"),
+    plot.background = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    legend.position="bottom",
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 12),
+    strip.background=element_rect(colour="white",
+                                    fill="white"))
+
+
+
+# Save the plot:
+#ggsave("output_files/plots/pleiotropy/connectivity_violin_5_groups.svg", last_plot(),
+      #width = 140,
+       #height = 110,
+       #units = "mm",
+       #dpi = 400)
+
+```
+## Statistical tests: Wilcoxon rank-sum test
+```{r}
+# Prepare the data-set:
+pleio_df <- connectivity_DEGs 
+
+pleio_df$group <- factor(pleio_df$group, levels = c("complete_reversed",
+                                                  "late_response",
+                                                  "incomplete_reversed",
+                                                  "plateau",
+                                                  "monotonic"))
+
+# Test for homogeneity of variance:
+car::leveneTest(log10_connectivity ~ group, data = pleio_df, center = "median")
+  
+# Perform Kruskal-Wallis across all groups:
+kruskal.test(log10_connectivity ~ group, data = pleio_df)
+
+# Perform pairwise Wilcoxon rank-sum tests:
+wilcox_conn <- pairwise.wilcox.test(pleio_df$log10_connectivity, 
+                                         pleio_df$group,
+                                         p.adjust.method = "none")
+wilcox_conn
+# Results into a dataframe:
+wilcox_test_df <- wilcox_conn$p.value
+wilcox_test_df <- data.frame(expand.grid(dimnames(wilcox_test_df)),
+                             array(wilcox_test_df)) %>% na.omit()
+colnames(wilcox_test_df) <- c("group1", "group2", "p_value")
+wilcox_test_df$p_value <- as.numeric(wilcox_test_df$p_value)
+# Multiple-test correction using fdr:
+wilcox_test_df$padj_fdr <- p.adjust(wilcox_test_df$p_value, "fdr")
+# Include contrast column:
+wilcox_test_df$contrast <- paste(wilcox_test_df$group1, wilcox_test_df$group2, sep= " VS ")
+# Include test name:
+wilcox_test_df$test <- "Wilcoxson rank-sum test, two tailed"
+# Include tested variable:
+wilcox_test_df$variable <- "log10(connectivity)"
+# select needed columns:
+wilcox_test_df <- wilcox_test_df %>% dplyr::select(variable, test, contrast, p_value, padj_fdr)
+# Include asterisks:
+wilcox_test_conn_5groups_df <- wilcox_test_df %>%
+  mutate(significance_fdr = case_when(
+    padj_fdr >= 0.05 ~ "n.s",          
+    padj_fdr < 0.05 & padj_fdr > 0.01 ~ "*",  
+    padj_fdr <= 0.01 & padj_fdr > 0.001 ~ "**", 
+    padj_fdr <= 0.001 & padj_fdr > 0.0001 ~ "***",
+    padj_fdr < 0.0001 ~ "****"))
+
+# Format variable:
+wilcox_test_conn_5groups_df$padj_fdr <- format(wilcox_test_conn_5groups_df$padj_fdr, scientific = TRUE, digits = 3)
+
+```
+# Desnsity plot - DEGs vs non-DEGs
+```{r}
+# Prepare the data-set:
+pleio_df <- connectivity_DEGs_and_nonDEGs  
+
+pleio_df$group <- factor(pleio_df$group, levels = c(
+                                                  "DEGs",
+                                                  "Non-DEGs"))
+
+
+plot1 <- pleio_df %>% ggplot(aes(x = log10_connectivity, fill=group, color=group)) +
+  geom_density(alpha=0.3) +
+  scale_fill_manual(values = c("#CC6677","#DDDDDD")) +
+  scale_color_manual(values = c("#CC6677","grey")) +
+  theme_classic()  + xlab(bquote(log[10](connectivity))) +
+  theme(
+    axis.title.y = element_text(size = 13),
+    axis.ticks.x = element_line(color="black"),
+    axis.text.x = element_text(size = 13, color = "black"),
+    axis.title.x = element_text(size = 13),
+    axis.ticks.y = element_line(color="black"),
+    axis.text.y = element_text(size = 13, color = "black"),
+    plot.background = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    legend.position="bottom",
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 10),
+    strip.background=element_rect(colour="white",
+                                    fill="white")) 
+
+
+plot2 <- pleio_df %>% ggplot(aes(y = log10_connectivity, x = group, fill=group, color=group)) +
+  geom_boxplot(alpha=0.3) +
+  scale_fill_manual(values = c("#CC6677","#DDDDDD")) +
+  scale_color_manual(values = c("#CC6677","grey")) +
+  theme_classic() + ylab(bquote(log[10](connectivity))) +  theme(
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(size = 13),
+    axis.ticks.x = element_line(color="black"),
+    axis.text.x = element_text(size = 13, color = "black"),
+    axis.ticks.y = element_line(color="black"),
+    axis.text.y = element_text(size = 13, color = "black"),
+    plot.background = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    legend.position="bottom",
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 10),
+    strip.background=element_rect(colour="white",
+                                    fill="white")) 
+
+combined_plots_conn_2groups <- plot1 + plot2
+combined_plots_conn_2groups
+
+# Save the plot:
+#ggsave("output_files/plots/pleiotropy/backgroundVSnonDEGs_conn.svg", combined_plots_conn_2groups,
+       #width = 120,
+       #height = 110,
+       #units = "mm",
+       #dpi = 400)
+
+```
+# Wilcoxon test: non-significant vs Background
+```{r}
+# Prepare the data-set:
+pleio_df <- connectivity_DEGs_and_nonDEGs  
+
+pleio_df$group <- factor(pleio_df$group, levels = c(
+                                                  "DEGs",
+                                                  "Non-DEGs"))
+
+# Perform pairwise Wilcoxon rank-sum tests:
+pairwise.wilcox.test(pleio_df$log10_connectivity, 
+                                         pleio_df$group,
+                                         p.adjust.method = "none")
+
+wilcox_conn <- wilcox.test(pleio_df$log10_connectivity ~ pleio_df$group)
+
+# Results into a data-frame:
+wilcox_test_backgroundVSnonDGES_conn <- data.frame(variable = "log10(connectivity)",
+                             test = "Wilcoxson rank-sum test, two tailed",
+                             contrast = "background (all DEGs) VS non-significant",
+                             p_value = wilcox_conn$p.value)
+
+```
+# # Part 1.3: correlation of connectivity and log2FC
+# Kendall´s tau rank correlation:
+Note: when there are ties in the ranks
+(many log2FC or pleiotropy values being very similar) then we should use another
+method like "kendall's tau rank correlation" that can handle it. 
+```{r}
+
+# Create data-set:
+combined_df <- connectivity_DEGs_and_background_df %>%
+  dplyr::select(gene_id, group,
+         log10_connectivity, logFC_F7, logFC_F31)
+colnames(combined_df)[4:5] <- c("gen7", "gen31")
+
+# Transform into absolute log2FC:
+combined_df$gen7 <- abs(combined_df$gen7)
+combined_df$gen31 <- abs(combined_df$gen31)
+
+combined_df <- combined_df %>% pivot_longer(cols = gen7:gen31,
+                                            values_to = "abs_log2FC",
+                                            names_to = "generation")
+# Compute rank based correlation coefficients:
+corr_conn_logFC <- combined_df %>%
+  group_by(group, generation) %>%
+  summarise(kendall_tau = cor.test(log10_connectivity,
+                                    abs_log2FC, method = "kendall")$estimate,
+            p_value = cor.test(log10_connectivity,
+                               abs_log2FC, method = "kendall")$p.value, 
+            .groups = "drop",
+            alternative = "two.sided")
+
+
+```
+# Fig. S 16 A
+```{r}
+
+# Plotting:
+unique_groups <- unique(combined_df$group)
+unique_generations <- unique(combined_df$generation)
+
+# Manual palette:
+manual_palette = c("grey",
+                   color_plateau,
+                   color_monotonic,
+                   color_late_response,
+                   color_incomplete_reversed,
+                   color_complete_reversed)
+
+combined_df$generation <- factor(combined_df$generation,
+                                 levels =c("gen7","gen31"))
+
+combined_df$group <- factor(combined_df$group,
+                            levels =c("background","plateau",
+                                      "monotonic", "late_response",
+                                      "incomplete_reversed", "complete_reversed"))
+
+
+correlation_connect_plot <- ggplot(combined_df,
+                           aes(y = abs_log2FC,
+                               x = log10_connectivity,
+                               fill = group)) +
+geom_point(color = 'white', size = 2.5, shape = 21) +
+scale_fill_manual(values = manual_palette,
+                  labels = c("Background",
+                             "Plateau",
+                             "Monotonic",
+                             "Late-response",
+                             "Incomplete-reverse",
+                             "Complete-reverse")) +  
+  facet_grid(group ~ generation, labeller = "label_both") +  
+  theme_linedraw() +
+    xlab(bquote(A~log[10]*(connectivity))) +
+    ylab(bquote(Abs.~(log[2]*FC))) +
+  stat_cor(aes(label = paste(..r.label..,
+                             ..p.label..,
+                             sep = "~`,`~")),
+           method = "kendall",
+           size = 3,
+           color = "blue",
+           label.x = 1,
+           label.y = 3.8,
+           p.accuracy = 0.001,
+           alternative = "two.sided") +
+  theme_light() +
+  theme(
+    axis.text = element_text(size = 14, color = "black"),  
+    panel.border = element_rect(color = "black",
+                                fill = NA,
+                                size = 1),
+    strip.text.y = element_blank(),
+    axis.title.y = element_text(size=14),
+    axis.title.x = element_text(size=14),
+    legend.title = element_text(size = 14),  
+    legend.text = element_text(size = 14),  
+    axis.line = element_line(color = "black"),  
+    axis.ticks = element_line(color = "black"),  
+    axis.text.y.right  = element_blank(),  
+    panel.grid = element_blank()) +
+  ylim(0,6) +
+  xlim(0,4) 
+
+correlation_connect_plot
+
+# Export the plot:
+#ggsave("output_files/plots/Pleiotropy/corr_connect_log2FC_F7_F31.svg",
+       #unit = "mm",
+       #width = 170,
+       #height = 200, 
+       #correlation_connect_plot)
+
+
+```
+
+# # Part 2: Tissue specificity (tau):
+# Prepare the data-set - Compute 1-Tau (pleiotropy)
+```{r}
+# Extract needed columns:
+tissue_specificity_df <- tau_flyatlas2[,c(1,3)]
+# Compute tau-1 (pleiotropy): tissue specificity value minus 1 = pleiotropy level
+tissue_specificity_df$tau <- 1 - tissue_specificity_df$tau
+colnames(tissue_specificity_df) <-  c("gene_id","tau") # tau refers to 1-tau!
+row.names(tissue_specificity_df) <- tissue_specificity_df$gene_id
+# Arrange the data set by gene_id:
+tissue_specificity_df <- tissue_specificity_df[order(tissue_specificity_df$gene_id), ]
+
+# Plotting:
+ggplot(data = tissue_specificity_df, aes(x = tau)) +
+  geom_histogram(bins = 20,
+                 color="darkcyan", fill="white", size = 1.5) +
+  theme_classic() +
+  xlab("1-tau") +
+  theme(axis.text.x = element_text(size=15),
+        axis.text.y = element_text(size=15),  
+        axis.title.x = element_text(size=20),
+        axis.title.y = element_text(size=20)) 
+
+
+```
+1-tau indicates the pleiotropic effect of a gene; a value of 1 means that this 
+gene is expressed equally across all tissues therefore has the highest level of 
+pleiotropy according to this classification. In the other hand, a 1-tau = 0 means 
+that the gene is  specific of a single tissue (out of the 15 tissues tested here).
+# Create tau_df:
+```{r}
+tau_df <- left_join(classify_trajectories, tissue_specificity_df, by ="gene_id")
+  
+```
+# # Part 2.2: Tau distribution in DEGs:
+## Prepare data-sets - DEGs and background
+```{r}
+
+## All genes:
+tau_all_genes <- left_join(classify_trajectories, tissue_specificity_df, by ="gene_id") 
+tau_all_genes <- tau_all_genes %>%
+  dplyr::mutate(group = case_when(group == "transitory_F7_F31" ~ "non_significant", TRUE ~ group))
+tau_all_genes <- tau_all_genes %>%
+  dplyr::mutate(full_group = case_when(full_group == "transitory_F7_F31_none" ~ "non_significant_none", TRUE ~ full_group))
+print("Some genes discarded because lack TAU information (TRUE):")
+table(tau_all_genes$group, is.na(tau_all_genes$tau))
+# Remove genes without tau information:
+tau_all_genes <- tau_all_genes %>% drop_na()
+
+## Background - all expressed genes:
+tau_background <- tau_all_genes 
+tau_background$group <- "background"
+
+## DEGs:
+tau_DEGs <- tau_all_genes %>% dplyr::filter(group != "non_significant")
+
+## Background - all expressed genes:
+tau_non_significant <- tau_all_genes %>% dplyr::filter(group == "non_significant")
+  
+# All groups + background 
+tau_groups_df <- rbind(tau_all_genes, tau_background)
+
+# DEG groups + background 
+tau_DEGs_and_background_df <- rbind(tau_DEGs, tau_background)
+tau_DEGs_and_background_df$abs_logFC_F7 <- abs(tau_DEGs_and_background_df$logFC_F7)
+tau_DEGs_and_background_df$abs_logFC_F31 <- abs(tau_DEGs_and_background_df$logFC_F31)
+
+# DEGs vs Non-significant:
+tau_DEGs_and_nonDEGs <- rbind(tau_DEGs, tau_non_significant)
+tau_DEGs_and_nonDEGs <- tau_DEGs_and_nonDEGs %>%
+  dplyr::mutate(group = case_when(group != "non_significant" ~ "DEGs", TRUE ~ "Non-DEGs"))
+table(tau_DEGs_and_nonDEGs$group)
+
+
+```
+## Export tau_groups_df:
+```{r}
+export_df <- tau_groups_df
+
+#write_csv(export_df, "input_files/oneminusTau_per_gene.csv")
+
+```
+# Plot 1-Tau distribution:
+```{r}
+tau_all_genes %>% ggplot(aes(x=tau, fill="red", alpha=0.3)) +
+  geom_density(linewidth = 1) +
+  theme_light() +
+  theme(
+    axis.title.y = element_text(size = 14),
+    axis.title.x = element_text(size = 14),
+    axis.ticks.y = element_line(color="black"),
+    axis.ticks.x = element_line(color="black"),
+    axis.text.y = element_text(size = 13, color = "black"),
+    axis.text.x = element_text(size = 13, color = "black"),
+    plot.background = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    legend.position="bottom") + xlab("1-Tau")
+
+
+
+```
+## Boxplots per group:
+```{r}
+tau_groups_df$group <- factor(tau_groups_df$group,
+                                        levels = c("background",
+                                                   "non_significant",
+                                                   "complete_reversed",
+                                                   "late_response", 
+                                                   "plateau",
+                                                      "incomplete_reversed",
+                                                   "monotonic"))
+
+tau_groups_df %>% 
+  ggplot(aes(x = group, y = tau, color = group)) + 
+  geom_boxplot(linewidth = 1) +  
+  labs(x = "group", y = "1-Tau", title = "") + 
+  theme_light() + 
+  scale_color_manual(values = c( "black","grey",
+                               color_complete_reversed,
+                               color_late_response,
+                               color_plateau,
+                               color_incomplete_reversed,
+                               color_monotonic),
+                     labels = c("Background","Non-significant",
+                                "Complete-reverse", "Late-response",
+                                "Plateau", "Incomplete-reverse",
+                                "Monotonic"), name="") +
+  theme(
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(size = 13),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.ticks.y = element_line(color="black"),
+    axis.text.y = element_text(size = 13, color = "black"),
+    plot.background = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    legend.position="bottom",
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 10),
+    strip.background=element_rect(colour="white",
+                                    fill="white"),
+    panel.border = element_rect(colour = "black",
+                                fill=NA, linewidth=0.5))
+
+
+# Save the plot:
+#ggsave("output_files/plots/pleiotropy/tau_boxplots_7_groups.svg", last_plot(),
+       #width = 120,
+       #height = 110,
+       #units = "mm",
+       #dpi = 300)
+
+```
+## Boxplots per group - 5 groups
+```{r}
+plot_df <- tau_DEGs
+plot_df$group <- factor(plot_df$group,
+                                        levels = c("complete_reversed",
+                                                   "late_response",                                                                                                              "incomplete_reversed",
+                                                   "plateau",
+                                                   "monotonic"))
+
+plot_df %>% 
+  ggplot(aes(x = group, y = tau, fill = group)) + 
+  geom_violin(linewidth = 0) +
+  geom_boxplot(fill = "white", width=0.2, color="black", alpha=0.4, outlier.size = 0) +
+  labs(x = "group", y = "1-Tau", title = "") + 
+  theme_classic() + 
+  scale_fill_manual(values = c(color_complete_reversed,
+                               color_late_response,
+                               color_incomplete_reversed,
+                               color_plateau,
+                               color_monotonic),
+                     labels = c("Complete-reverse",
+                                "Late-response",
+                                "Incomplete-reverse",
+                                "Plateau",
+                                "Monotonic"), name="") +
+  theme(
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(size = 13),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.ticks.y = element_line(color="black"),
+    axis.text.y = element_text(size = 13, color = "black"),
+    plot.background = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    legend.position="bottom",
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 12),
+    strip.background=element_rect(colour="white",
+                                    fill="white"))
+
+
+# Save the plot:
+#ggsave("output_files/plots/pleiotropy/tau_boxplots_5_groups.svg", last_plot(),
+       #width = 150,
+       #height = 110,
+       #units = "mm",
+       #dpi = 400)
+
+```
+## Statistical tests: Kruskal-Wallis & Wilcoxon rank-sum test
+```{r}
+# Prepare the data-set:
+pleio_df <- tau_DEGs 
+
+pleio_df$group <- factor(pleio_df$group, levels = c("complete_reversed",
+                                                  "late_response",
+                                                  "incomplete_reversed",
+                                                  "plateau",
+                                                  "monotonic"))
+# Test for homogeneity of variance:
+car::leveneTest(tau ~ group, data = pleio_df, center = "median")
+  
+# Perform Kruskal-Wallis across all groups:
+kruskal.test(tau ~ group, data = pleio_df)
+
+# Perform pairwise Wilcoxon rank-sum tests:
+wilcox_tau <- pairwise.wilcox.test(pleio_df$tau, 
+                                         pleio_df$group,
+                                         p.adjust.method = "none")
+wilcox_tau
+# Results into a dataframe:
+wilcox_test_df <- wilcox_tau$p.value
+wilcox_test_df <- data.frame(expand.grid(dimnames(wilcox_test_df)),
+                             array(wilcox_test_df)) %>% na.omit()
+colnames(wilcox_test_df) <- c("group1", "group2", "p_value")
+wilcox_test_df$p_value <- as.numeric(wilcox_test_df$p_value)
+
+# Multiple-test correction using fdr:
+wilcox_test_df$padj_fdr <- p.adjust(wilcox_test_df$p_value, "fdr")
+# Include contrast column:
+wilcox_test_df$contrast <- paste(wilcox_test_df$group1, wilcox_test_df$group2, sep= " VS ")
+# Include test name:
+wilcox_test_df$test <- "Wilcoxson rank-sum test, two tailed"
+# Include tested variable:
+wilcox_test_df$variable <- "1-Tau"
+# select needed columns:
+wilcox_test_df <- wilcox_test_df %>% dplyr::select(variable, test, contrast, p_value,padj_fdr)
+# Include asterisks:
+wilcox_test_tau_5groups_df <- wilcox_test_df %>%
+  mutate(significance_fdr = case_when(
+    padj_fdr >= 0.05 ~ "n.s",          
+    padj_fdr < 0.05 & padj_fdr > 0.01 ~ "*",  
+    padj_fdr <= 0.01 & padj_fdr > 0.001 ~ "**", 
+    padj_fdr <= 0.001 & padj_fdr > 0.0001 ~ "***",
+    padj_fdr < 0.0001 ~ "****"))
+
+# Format variable:
+wilcox_test_tau_5groups_df$padj_fdr <- format(wilcox_test_tau_5groups_df$padj_fdr, scientific = TRUE, digits = 3)
+
+```
+# Desnsity plot - DEGs vs non-DEGs
+```{r}
+# Prepare the data-set:
+pleio_df <- tau_DEGs_and_nonDEGs  
+
+pleio_df$group <- factor(pleio_df$group, levels = c(
+                                                  "DEGs",
+                                                  "Non-DEGs"))
+
+
+plot1 <- pleio_df %>% ggplot(aes(x = tau, fill=group, color=group)) +
+  geom_density(alpha=0.3) +
+  scale_fill_manual(values = c("#CC6677","#DDDDDD")) +
+  scale_color_manual(values = c("#CC6677","grey")) +
+  theme_classic() + xlab(label="1-Tau") + 
+  theme(
+    axis.title.y = element_text(size = 13),
+    axis.ticks.y = element_line(color="black"),
+    axis.text.y = element_text(size = 13, color = "black"),
+    axis.text.x = element_text(size = 13, color = "black"),
+    axis.title.x = element_text(size = 13),
+    plot.background = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    legend.position="bottom",
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 10),
+    strip.background=element_rect(colour="white",
+                                    fill="white"))
+
+plot2 <- pleio_df %>% ggplot(aes(y = tau, x = group, fill=group, color=group)) +
+  geom_boxplot(alpha=0.3) +
+  scale_fill_manual(values = c("#CC6677","#DDDDDD")) +
+  scale_color_manual(values = c("#CC6677","grey")) +
+  theme_classic() + ylab(label="1-Tau") + 
+  theme(
+    axis.title.y = element_text(size = 13),
+    axis.ticks.y = element_line(color="black"),
+    axis.text.y = element_text(size = 13, color = "black"),
+    axis.text.x = element_blank(),
+    axis.title.x = element_blank(),
+    plot.background = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    legend.position="bottom",
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 10),
+    strip.background=element_rect(colour="white",
+                                    fill="white"))
+
+
+combined_plots_tau_2groups <- plot1 + plot2
+combined_plots_tau_2groups
+
+# Save the plot:
+#ggsave("output_files/plots/pleiotropy/backgroundVSnonDEGs_Tau.svg", combined_plots_tau_2groups,
+       #width = 120,
+       #height = 110,
+       #units = "mm",
+       #dpi = 400)
+```
+
+# Wilcoxon test: non-significant vs Background
+```{r}
+# Prepare the data-set:
+pleio_df <- tau_DEGs_and_nonDEGs  
+
+pleio_df$group <- factor(pleio_df$group, levels = c(
+                                                  "DEGs",
+                                                  "Non-DEGs"))
+# Perform pairwise Wilcoxon rank-sum tests:
+pairwise.wilcox.test(pleio_df$tau, 
+                                         pleio_df$group,
+                                         p.adjust.method = "none")
+
+wilcox_tau <- wilcox.test(pleio_df$tau ~ pleio_df$group)
+
+# Results into a dataframe:
+wilcox_test_backgroundVSnonDGES_tau <- data.frame(variable = "1-Tau",
+                             test = "Wilcoxson rank-sum test, two tailed",
+                             contrast = "background (all DEGs) VS non-significant",
+                             p_value = wilcox_tau$p.value)
+
+
+```
+## ########  Export Wilcoxon test results - connectivity and tau 
+```{r}
+
+# Combine connectivity and tau tests results:
+export_df <- cbind(wilcox_test_conn_5groups_df, wilcox_test_tau_5groups_df)
+
+wilcox_test_backgroundVSnonDGES_conn$padj_fdr <- "NA" 
+wilcox_test_backgroundVSnonDGES_conn$significance_fdr <- "NA" 
+
+wilcox_test_backgroundVSnonDGES_tau$padj_fdr <- "NA" 
+wilcox_test_backgroundVSnonDGES_tau$significance_fdr <- "NA" 
+
+temp <- cbind(wilcox_test_backgroundVSnonDGES_conn, wilcox_test_backgroundVSnonDGES_tau)
+
+export_df <- rbind(export_df, temp)
+#Rename columns:
+colnames(export_df) <- c( "variable" , "test" , "contrast" , "p_value",
+                          "padj_fdr" , "significance_fdr",
+                          "variable_2" , "test_2" , "contrast_2" , "p_value_2",
+                          "padj_fdr_2" , "significance_fdr_2")
+
+# Adjust all groups using FDR:
+export_df$padj_fdr <- p.adjust(export_df$p_value, "fdr")
+export_df$padj_fdr_2 <- p.adjust(export_df$p_value, "fdr")
+
+# Include significance for fdr corrected p-values:
+
+export_df <- export_df %>%
+  mutate(significance_fdr = case_when(
+    padj_fdr >= 0.05 ~ "n.s",          
+    padj_fdr < 0.05 & padj_fdr > 0.01 ~ "*",  
+    padj_fdr <= 0.01 & padj_fdr > 0.001 ~ "**", 
+    padj_fdr <= 0.001 & padj_fdr > 0.0001 ~ "***",
+    padj_fdr < 0.0001 ~ "****"))
+
+export_df <- export_df %>%
+  mutate(significance_fdr_2 = case_when(
+    padj_fdr_2 >= 0.05 ~ "n.s",          
+    padj_fdr_2 < 0.05 & padj_fdr_2 > 0.01 ~ "*",  
+    padj_fdr_2 <= 0.01 & padj_fdr_2 > 0.001 ~ "**", 
+    padj_fdr_2 <= 0.001 & padj_fdr_2 > 0.0001 ~ "***",
+    padj_fdr_2 < 0.0001 ~ "****"))
+
+
+#write_xlsx(export_df, "output_files/S5_wilcox_test_pleiotropy.xlsx")
+
+```
+
+# Part 2.3: correlation of connectivity and log2FC
+# Kendall´s tau rank correlation:
+```{r}
+
+# Create data-set:
+combined_df <- tau_DEGs_and_background_df %>% dplyr::select(gene_id, group,
+                                                            tau, logFC_F7,
+                                                            logFC_F31)
+colnames(combined_df)[4:5] <- c("gen7", "gen31")
+# Transform into absolute log2FC:
+combined_df$gen7 <- abs(combined_df$gen7)
+combined_df$gen31 <- abs(combined_df$gen31)
+
+combined_df <- combined_df %>% pivot_longer(cols = gen7:gen31,
+                                            values_to = "abs_log2FC",
+                                            names_to = "generation")
+
+corr_tau_logFC <- combined_df %>%
+  group_by(group, generation) %>%
+  summarise(kendall_tau = cor.test(tau, abs_log2FC, method = "kendall")$estimate,
+            p_value = cor.test(tau, abs_log2FC, method = "kendall")$p.value, 
+            .groups = "drop", alternative = "two.sided")
+  
+```
+
+# Fig. S 16 B
+```{r}
+
+unique_groups <- unique(combined_df$group)
+unique_generations <- unique(combined_df$generation)
+
+
+# Manual palette:
+manual_palette = c("grey",
+                   color_plateau,
+                   color_monotonic,
+                   color_late_response,
+                   color_incomplete_reversed,
+                   color_complete_reversed)
+
+combined_df$generation <- factor(combined_df$generation, levels =c("gen7","gen31"))
+
+combined_df$group <- factor(combined_df$group, levels = c("background","plateau", "monotonic",                                                                             "late_response",                                                                              "incomplete_reversed", "complete_reversed"))
+
+
+
+
+correlation_tau_plot <- ggplot(combined_df,
+                           aes(y = abs_log2FC,
+                               x = tau,
+                               fill = group)) +
+geom_point(color = 'white', size = 2.5, shape = 21) +
+scale_fill_manual(values = manual_palette,
+                  labels = c("Background",
+                             "Plateau",
+                             "Monotonic",
+                             "Late-response",
+                             "Incomplete-reverse",
+                             "Complete-reverse")) +  
+  facet_grid(group ~ generation, labeller = "label_both") +  
+  theme_linedraw() +
+    xlab("1-Tau") +
+    ylab(bquote(Abs.~(log[2]*FC))) +
+  stat_cor(aes(label = paste(..r.label..,
+                             ..p.label..,
+                             sep = "~`,`~")),
+           method = "kendall",
+           size = 3,
+           color = "blue",
+           label.x = 0.2,
+           label.y = 3.8,
+           p.accuracy = 0.001) +
+  theme_light() +
+  theme(
+    axis.text = element_text(size = 14, color = "black"),  
+    panel.border = element_rect(color = "black",
+                                fill = NA,
+                                size = 1),
+    strip.text.y = element_blank(),
+    axis.title.y = element_text(size=14),
+    axis.title.x = element_text(size=12),
+    legend.title = element_text(size = 14),  
+    legend.text = element_text(size = 14),  
+    axis.line = element_line(color = "black"),  
+    axis.ticks = element_line(color = "black"),  
+    axis.text.y.right  = element_blank(),  
+    panel.grid = element_blank()) +
+  ylim(0,6) +
+  xlim(0,1) 
+
+correlation_tau_plot
+
+# Export the plot:
+ggsave("output_files/plots/Pleiotropy/corr_tau_log2FC_F7_F31.svg",
+       unit = "mm",
+       width = 170,
+       height = 200, 
+       correlation_tau_plot)
+
+
+```
+## ######## Export correlation tests - connectivity and tau
+Correct p-values across all contrasts
+```{r}
+# Combine data-sets:
+corr_pleio_logfc <- cbind(corr_conn_logFC, corr_tau_logFC)
+# Rename columns:
+colnames(corr_pleio_logfc) <- c("group","generation","kendall_tau",
+                                "p_value","alternative", "group_2", 
+                                "generation_2" ,"kendall_tau_2",
+                                "p_value_2","alternative_2" )
+
+# Adjust p-values across all contrasts:
+corr_pleio_logfc <- corr_pleio_logfc %>%
+  mutate(padj_fdr = p.adjust(p_value, method="fdr"),
+         padj_fdr_2 = p.adjust(p_value_2, method="fdr"))
+
+
+# Export results:
+#write_xlsx(corr_pleio_logfc, "output_files/S6_correlation_pleiotropy_log2FC")
+
+```
+
+--- END ---
+
