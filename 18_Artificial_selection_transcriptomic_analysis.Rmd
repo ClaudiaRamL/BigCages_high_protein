@@ -251,7 +251,6 @@ nrow(low_genes_filtered) # total genes after filtering
 (nrow(subset_data_wide))
 
 ```
-# Fig. S18 A PCA
 ```{r}
 # Create DGEList
 y <- DGEList(counts = low_genes_filtered, group = metadata$generation)
@@ -389,6 +388,7 @@ scale_color_set = scale_color_manual(
   plot_list[[1]]+plot_list[[2]]+plot_list[[3]]+plot_list[[4]]+plot_list[[5]]+plot_list[[6]]+plot_list[[7]]+plot_list[[8]]+plot_list[[9]] + plot_layout(guides='collect')
 
 ```
+# Fig. S18 A PCA
 ```{r}
 plot_df <- pcaPlot %>% dplyr::filter(generation %in% c("G0", "G7", "G13"))
 # List of PCAs to be plotted:
@@ -792,7 +792,7 @@ nrow(low_genes_filtered) # total genes after filtering
 (nrow(subset_data_wide))
 
 ```
-# Fig. S18 A PCA
+
 ```{r}
 # Create DGEList
 y <- DGEList(counts = low_genes_filtered, group = metadata$generation)
@@ -930,8 +930,7 @@ scale_color_set = scale_color_manual(
   plot_list[[1]]+plot_list[[2]]+plot_list[[3]]+plot_list[[4]]+plot_list[[5]]+plot_list[[6]]+plot_list[[7]]+plot_list[[8]]+plot_list[[9]] + plot_layout(guides='collect')
 
 ```
-
-
+# Fig. S18 A PCA
 ```{r}
 plot_df <- pcaPlot %>% dplyr::filter(generation %in% c("G0", "G7", "G13"))
 # List of PCAs to be plotted:
