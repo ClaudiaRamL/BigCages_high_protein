@@ -1,7 +1,7 @@
 # BigCages_high_protein
 
 This folder contains all the scripts needed to reproduce the analyses in:
-**Tracking polygenic adaptation: phenotypic stasis after rapid adaptation in large populations of *Drosophila* ** 
+**Tracking polygenic adaptation: phenotypic stasis after rapid adaptation in large populations of *Drosophila*** 
 Claudia Ramirez-Lanzas, Marlies Dolezal, Sarah Signor, Christian Schlötterer, and Neda Barghi  
 
 ## 01_Fecundity.Rmd
@@ -70,7 +70,7 @@ Input 1: DE_overall_results.csv\
 Input 2: DE_repwise_results.csv\
 Input 3: count_table.csv\
 
--- Output 1: classify_trajectories_df.csv DE results classified by trajectories.\
+Output 1: classify_trajectories_df.csv DE results classified by trajectories.\
 
 ##  09_ Compute_gene_expression_variance.Rmd
 This R notebook contains the code to compute gene variance using log2CPM expression
@@ -205,7 +205,7 @@ the equilibrium or stasis phase.
 Here we use the transcriptomic data published by
 C. Souto-Maior et al., PLOS Comput. Biol (2023)
 
--- Input 1: Souto_Maior_Artificial_Selection_GSE202600_Normalized_read_counts.csv\
+Input 1: Souto_Maior_Artificial_Selection_GSE202600_Normalized_read_counts.csv\
 
 
 ## 19_Diet_composition.Rmd
