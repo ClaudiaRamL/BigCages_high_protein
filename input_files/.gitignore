@@ -1,0 +1,4 @@
+# Files in this directory are the inputs of the analysis scripts (temporarily ignored)
+*
+# Except this file
+!.gitignore

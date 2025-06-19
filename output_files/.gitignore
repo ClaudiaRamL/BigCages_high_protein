@@ -1,0 +1,4 @@
+# Files in this directory are the result of the analysis made by the scripts
+*
+# Except this file
+!.gitignore

@@ -1,0 +1,21 @@
+# MacOS files
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Rfiles
+.Rproj.user/
+.Rhistory
+.Rapp.history
+.RData
+.RDataTmp
+.Ruserdata
+R_project.Rproj
+
+# Microsoft Office save files
+~$*
+
+# Files:
+input_files
+output_files
