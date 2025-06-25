@@ -284,7 +284,8 @@ plot_df <- DE_results_wide
 plot_df <- plot_df %>%
   dplyr::mutate(label = case_when(label == "F7_specific" ~ "complete_reversed",
                                   label == "F31_specific" ~ "late_response",
-                                  label == "shared" ~ "shared", TRUE ~ label))
+                                  label == "shared" ~ "shared",
+                                  TRUE ~ label))
 # Create variables for legend:
 shared_nb <- nrow(plot_df %>% dplyr::filter(label == "shared"))
 not_sig_nb <- nrow(plot_df %>% dplyr::filter(label == "not_sig"))
@@ -329,8 +330,8 @@ plot_df %>%
   theme_linedraw() + 
   theme(panel.grid.major = element_blank(),
         panel.grid.minor = element_blank(),
-        axis.text = element_text(size = 16),  
-        axis.title = element_text(size = 16),  
+        axis.text = element_text(size = 14),  
+        axis.title = element_text(size = 14),  
         axis.ticks = element_line(size = 1),
         panel.border = element_rect(color = "black", fill = NA, size = 1)) +
   scale_x_continuous(breaks = c(-8, -6, -4, -2, 0, 2, 4, 6, 8), limits = c(-8, 8)) +
@@ -338,10 +339,15 @@ plot_df %>%
 
 # Save plot:
 #ggsave(plot = last_plot(), "output_files/plots/correlation_plots_and_trajectories/latest_version/corr_plot.svg", 
-       #width = 180, 
+       #width = 200, 
        #units = "mm", 
-       #dpi = 300)
+       #dpi = 200)
 
+#ggsave(plot = last_plot(), "output_files/plots/correlation_plots_and_trajectories/latest_version/corr_plot.png", 
+       #width = 150,
+       #height = 150, 
+       #units = "mm", 
+       #dpi = 400)
 
 ```
 # Summary:

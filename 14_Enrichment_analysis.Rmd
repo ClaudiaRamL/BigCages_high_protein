@@ -65,10 +65,6 @@ DE_results <- read_csv("input_files/DE_overall_results.csv", show_col_types = FA
 
 fly_atlas2_FPKM <- read_csv("input_files/FlyAtlas2_gene_data_2023.csv", show_col_types = FALSE)
 
-DE_rep_wise_results <- read_csv("input_files/DE_repwise_results.csv", show_col_types = FALSE)
-
-shared_upset_data <- read_csv("input_files/shared_upset_data.csv", show_col_types = FALSE)
-
 ```
 
 * classify_trajectories: contains all genes classified by transcriptomic trajectory.
@@ -79,10 +75,6 @@ Including contrasts: B_F7, B_F32 and  F7_vs_F31. P-values corrected across the 3
 * fly_atlas2_FPKM: contains the gene expression data-set from Flyatlas2 (only FPKM data )
 (downloaded on September 2023). 
 
-* DE_rep_wise_results: contains the results of DE analysis using dream model. 
-Including contrasts: Base vs evolved replicate.
-All replicates were compared to base independently in each generation.
-Each replicated had 3 samples. P-values corrected across all contrasts. 
 
 * shared_upset_data: it contains the data-set used to make the UpSet plots.
 It contains information about the DEGs detected in the replicate specific DE
@@ -909,7 +901,7 @@ for (i in seq(1:length(list_datasets))) {
                   y = group,
                   fill= padj)) + 
     geom_tile() + 
-    theme_minimal() + 
+    theme_classic() + 
     custom_palette + 
     theme(axis.text.x = element_text(angle = 90,
                                      vjust = 0.5,
@@ -934,8 +926,8 @@ a <- a + scale_y_discrete(labels = c("All DEGs","Complete-reverse","Monotonic",
 a
 
 # Export file:
-#ggsave("output_files/plots/Enrichment/tissue_enrichment.svg",  width = 300, height = 200, units= "mm", a)
-
+#ggsave("output_files/plots/Enrichment/tissue_enrichment.svg",  width = 300, height = 200, units= "mm", dpi = 400, a)
+#ggsave("output_files/plots/Enrichment/tissue_enrichment.png",  width = 300, height = 200, units= "mm", dpi = 400, a)
 ```
 # # Part 3: KEGG pathway Enrichment - transcriptomic groups
 ### Prepare Gene Lists:

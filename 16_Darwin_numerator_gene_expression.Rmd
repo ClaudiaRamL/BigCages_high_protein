@@ -383,7 +383,6 @@ LO_pheno_rates$pheno_time <- paste(LO_pheno_rates$phenotype,  LO_pheno_rates$gen
 LO_pheno_rates$pheno_level_time <- paste(LO_pheno_rates$pheno_level,  LO_pheno_rates$gen_interval, sep="_")
 
 ```
-
 ## Darwin Numerator per gene: Fig. 4 C
 ```{r}
 

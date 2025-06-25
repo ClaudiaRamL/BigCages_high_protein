@@ -295,7 +295,6 @@ combined_conn_rep_wise_parallel_df <- combined_conn_rep_wise_parallel_df %>%
     padj_fdr <= 0.01 & padj_fdr > 0.001 ~ "**", 
     padj_fdr <= 0.001 & padj_fdr > 0.0001 ~ "***" ,
     padj_fdr < 0.0001 ~ "****"))
-combined_conn_rep_wise_parallel_df$padj_Bonferroni <- format(combined_conn_rep_wise_parallel_df$padj_Bonferroni, scientific = TRUE, digits = 2)
 # Export test results:
 combined_conn_rep_wise_parallel_df$test <- "Wilcoxson rank sum test, two tailed"
 # Include tested variable:
@@ -388,7 +387,7 @@ colnames(combined_tau_rep_wise_parallel_df) <- c("variable","generation","contra
 ```{r}
 export_df <- rbind(combined_tau_rep_wise_parallel_df, combined_conn_rep_wise_parallel_df)
 
-#write_xlsx(export_df, "output_files/S7_wilcox_test_pleiotropy_and_parallellism")
+write_xlsx(export_df, "output_files/S7_wilcox_test_pleiotropy_and_parallellism.xlsx")
 
 ```
 

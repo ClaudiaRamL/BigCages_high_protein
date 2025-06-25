@@ -41,7 +41,6 @@ library("lme4")
 sessionInfo(package = NULL)
 
 ```
-
 # Import file: 
 ```{r}
 count_table <- read.delim("input_files/count_table.csv",  sep = ";")
@@ -305,7 +304,6 @@ export_df <- DE_overall_results
 ## Summary plots generation DEGS:
 ```{r}
 
-pallete_treatments <- c("orange","#af8dc3","#762a83")
 
 DE_overall_results %>% dplyr::filter(padj_fdr < 0.05) %>% 
   ggplot(aes(x = contrast)) + 
@@ -315,7 +313,7 @@ DE_overall_results %>% dplyr::filter(padj_fdr < 0.05) %>%
             position = "stack") + 
   labs(x = "contrast", y = "No DEGs",
        title = "overall response") + 
-  scale_fill_manual(values = pallete_treatments,
+  scale_fill_manual(
                     labels = NULL,   
                     name = NULL)  + 
   theme_light() +   
@@ -394,9 +392,9 @@ plot_df %>%
 ```
 
 # # PART 2: Replicate-wise model
-Here the replicate specific transcriptomic response of each evolved replicates
-is modeled. We use 3 samples per replicate, each sub-replicate generated during 2 generations
-of Common Garden Experiment.
+Here the replicate specific transcriptomic response of each evolved replicate
+is modeled. We use 3 samples per replicate, each sub-replicate generated during
+2 generations of Common Garden Experiment.
 ### Filter low expression:
 ```{r}
 #Set CPM threshold:
@@ -673,18 +671,18 @@ vobjDream_ebayes_R6 <- variancePartition::eBayes(vobjDream_R6, robust=TRUE)
 ```
 # Export vobjDream_ebayes object:
 ```{r}
-save(vobjDream_ebayes_R1, file = "output_files/vobjDream_ebayes_DE_only_R1.RData")
-save(vobjDream_ebayes_R2, file = "output_files/vobjDream_ebayes_DE_only_R2.RData")
-save(vobjDream_ebayes_R3, file = "output_files/vobjDream_ebayes_DE_only_R3.RData")
-save(vobjDream_ebayes_R4, file = "output_files/vobjDream_ebayes_DE_only_R4.RData")
-save(vobjDream_ebayes_R5, file = "output_files/vobjDream_ebayes_DE_only_R5.RData")
-save(vobjDream_ebayes_R6, file = "output_files/vobjDream_ebayes_DE_only_R6.RData")
+#save(vobjDream_ebayes_R1, file = "output_files/vobjDream_ebayes_DE_only_R1.RData")
+#save(vobjDream_ebayes_R2, file = "output_files/vobjDream_ebayes_DE_only_R2.RData")
+#save(vobjDream_ebayes_R3, file = "output_files/vobjDream_ebayes_DE_only_R3.RData")
+#save(vobjDream_ebayes_R4, file = "output_files/vobjDream_ebayes_DE_only_R4.RData")
+#save(vobjDream_ebayes_R5, file = "output_files/vobjDream_ebayes_DE_only_R5.RData")
+#save(vobjDream_ebayes_R6, file = "output_files/vobjDream_ebayes_DE_only_R6.RData")
+
 ```
-# Adjust p-values:
+# Adjust p-values: test
 The p-values are corrected across all genes across the 3 different contrasts
 (1 replicate in 2 evolved generations). We use fdr method.
 ```{r}
-
 L_base_01_F7_res <- topTable(vobjDream_ebayes_R1, coef = "L_base_01_F7", n = nrow(count_table_R1), adjust.method = NULL)
 L_base_01_F7_res$contrast <- "L_base_01_F7"
 L_base_01_F7_res <- L_base_01_F7_res %>% rownames_to_column(var = "gene_id")  
@@ -700,6 +698,145 @@ L_base_01_F7_F31_res <- L_base_01_F7_F31_res %>% rownames_to_column(var = "gene_
 all_DE_results_R1 <- rbind(L_base_01_F7_res,
                         L_base_01_F31_res,
                         L_base_01_F7_F31_res)
+
+all_DE_results_R1$padj_fdr <- p.adjust(all_DE_results_R1$P.Value, method = "fdr")
+
+
+###
+L_base_02_F7_res <- topTable(vobjDream_ebayes_R2, coef = "L_base_02_F7", n = nrow(count_table_R2), adjust.method = NULL)
+L_base_02_F7_res$contrast <- "L_base_02_F7"
+L_base_02_F7_res <- L_base_02_F7_res %>% rownames_to_column(var = "gene_id")  
+#
+L_base_02_F31_res <- topTable(vobjDream_ebayes_R2, coef = "L_base_02_F31", n = nrow(count_table_R2), adjust.method = NULL)
+L_base_02_F31_res$contrast <- "L_base_02_F31"
+L_base_02_F31_res <- L_base_02_F31_res %>% rownames_to_column(var = "gene_id")  
+#
+L_base_02_F7_F31_res <- topTable(vobjDream_ebayes_R2, coef = "L_base_02_F7_F31", n = nrow(count_table_R2), adjust.method = NULL)
+L_base_02_F7_F31_res$contrast <- "L_base_02_F7_F31"
+L_base_02_F7_F31_res <- L_base_02_F7_F31_res %>% rownames_to_column(var = "gene_id")  
+# Merge the data-sets:
+all_DE_results_R2 <- rbind(L_base_02_F7_res,
+                        L_base_02_F31_res,
+                        L_base_02_F7_F31_res)
+
+all_DE_results_R2$padj_fdr <- p.adjust(all_DE_results_R2$P.Value, method = "fdr")
+
+###
+L_base_03_F7_res <- topTable(vobjDream_ebayes_R3, coef = "L_base_03_F7", n = nrow(count_table_R3), adjust.method = NULL)
+L_base_03_F7_res$contrast <- "L_base_03_F7"
+L_base_03_F7_res <- L_base_03_F7_res %>% rownames_to_column(var = "gene_id")  
+#
+L_base_03_F31_res <- topTable(vobjDream_ebayes_R3, coef = "L_base_03_F31", n = nrow(count_table_R3), adjust.method = NULL)
+L_base_03_F31_res$contrast <- "L_base_03_F31"
+L_base_03_F31_res <- L_base_03_F31_res %>% rownames_to_column(var = "gene_id")  
+#
+L_base_03_F7_F31_res <- topTable(vobjDream_ebayes_R3, coef = "L_base_03_F7_F31", n = nrow(count_table_R3), adjust.method = NULL)
+L_base_03_F7_F31_res$contrast <- "L_base_03_F7_F31"
+L_base_03_F7_F31_res <- L_base_03_F7_F31_res %>% rownames_to_column(var = "gene_id")  
+# Merge the data-sets:
+all_DE_results_R3 <- rbind(L_base_03_F7_res,
+                        L_base_03_F31_res,
+                        L_base_03_F7_F31_res)
+all_DE_results_R3$padj_fdr <- p.adjust(all_DE_results_R3$P.Value, method = "fdr")
+
+###
+
+L_base_04_F7_res <- topTable(vobjDream_ebayes_R4, coef = "L_base_04_F7", n = nrow(count_table_R4), adjust.method = NULL)
+L_base_04_F7_res$contrast <- "L_base_04_F7"
+L_base_04_F7_res <- L_base_04_F7_res %>% rownames_to_column(var = "gene_id")  
+#
+L_base_04_F31_res <- topTable(vobjDream_ebayes_R4, coef = "L_base_04_F31", n = nrow(count_table_R4), adjust.method = NULL)
+L_base_04_F31_res$contrast <- "L_base_04_F31"
+L_base_04_F31_res <- L_base_04_F31_res %>% rownames_to_column(var = "gene_id")  
+#
+L_base_04_F7_F31_res <- topTable(vobjDream_ebayes_R4, coef = "L_base_04_F7_F31", n = nrow(count_table_R4), adjust.method = NULL)
+L_base_04_F7_F31_res$contrast <- "L_base_04_F7_F31"
+L_base_04_F7_F31_res <- L_base_04_F7_F31_res %>% rownames_to_column(var = "gene_id")  
+# Merge the data-sets:
+all_DE_results_R4 <- rbind(L_base_04_F7_res,
+                        L_base_04_F31_res,
+                        L_base_04_F7_F31_res)
+all_DE_results_R4$padj_fdr <- p.adjust(all_DE_results_R4$P.Value, method = "fdr")
+
+###
+
+L_base_05_F7_res <- topTable(vobjDream_ebayes_R5, coef = "L_base_05_F7", n = nrow(count_table_R5), adjust.method = NULL)
+L_base_05_F7_res$contrast <- "L_base_05_F7"
+L_base_05_F7_res <- L_base_05_F7_res %>% rownames_to_column(var = "gene_id")  
+#
+L_base_05_F31_res <- topTable(vobjDream_ebayes_R5, coef = "L_base_05_F31", n = nrow(count_table_R5), adjust.method = NULL)
+L_base_05_F31_res$contrast <- "L_base_05_F31"
+L_base_05_F31_res <- L_base_05_F31_res %>% rownames_to_column(var = "gene_id")  
+#
+L_base_05_F7_F31_res <- topTable(vobjDream_ebayes_R5, coef = "L_base_05_F7_F31", n = nrow(count_table_R5), adjust.method = NULL)
+L_base_05_F7_F31_res$contrast <- "L_base_05_F7_F31"
+L_base_05_F7_F31_res <- L_base_05_F7_F31_res %>% rownames_to_column(var = "gene_id")  
+# Merge the data-sets :
+all_DE_results_R5 <- rbind(L_base_05_F7_res,
+                        L_base_05_F31_res,
+                        L_base_05_F7_F31_res)
+all_DE_results_R5$padj_fdr <- p.adjust(all_DE_results_R5$P.Value, method = "fdr")
+
+###
+
+L_base_06_F7_res <- topTable(vobjDream_ebayes_R6, coef = "L_base_06_F7", n = nrow(count_table_R6), adjust.method = NULL)
+L_base_06_F7_res$contrast <- "L_base_06_F7"
+L_base_06_F7_res <- L_base_06_F7_res %>% rownames_to_column(var = "gene_id")  
+#
+L_base_06_F31_res <- topTable(vobjDream_ebayes_R6, coef = "L_base_06_F31", n = nrow(count_table_R6), adjust.method = NULL)
+L_base_06_F31_res$contrast <- "L_base_06_F31"
+L_base_06_F31_res <- L_base_06_F31_res %>% rownames_to_column(var = "gene_id")  
+#
+L_base_06_F7_F31_res <- topTable(vobjDream_ebayes_R6, coef = "L_base_06_F7_F31", n = nrow(count_table_R6), adjust.method = NULL)
+L_base_06_F7_F31_res$contrast <- "L_base_06_F7_F31"
+L_base_06_F7_F31_res <- L_base_06_F7_F31_res %>% rownames_to_column(var = "gene_id")  
+# Merge the data-sets:
+all_DE_results_R6 <- rbind(L_base_06_F7_res,
+                        L_base_06_F31_res,
+                        L_base_06_F7_F31_res)
+all_DE_results_R6$padj_fdr <- p.adjust(all_DE_results_R6$P.Value, method = "fdr")
+
+
+
+## Create DE_repwise_results data-set:
+DE_repbyrep_3_contrasts_results <- rbind(all_DE_results_R1, all_DE_results_R2,
+                                         all_DE_results_R3, all_DE_results_R4,
+                                         all_DE_results_R5, all_DE_results_R6)
+# Remove per group adjusted val:
+#DE_repbyrep_3_contrasts_results <- DE_repbyrep_3_contrasts_results %>% dplyr::select("gene_id","logFC","AveExpr","t","P.Value","B","contrast")
+# Adjust p-values across all contrasts:
+#DE_repbyrep_3_contrasts_results$padj_fdr <- p.adjust(DE_repbyrep_3_contrasts_results$P.Value, method = "fdr")
+
+
+# Add generation:
+DE_repbyrep_3_contrasts_results <- DE_repbyrep_3_contrasts_results %>% 
+     dplyr::mutate(generation = case_when(
+       grepl("F7_F31", contrast) ~ "transitory_F7_F31",
+       grepl("_F31", contrast) ~ "gen31",
+       grepl("_F7", contrast)  ~ "gen07"))
+  
+```
+
+# Adjust p-values:
+The p-values are corrected across all genes across the 3 different contrasts
+(1 replicate in 2 evolved generations). We use fdr method.
+```{r}
+L_base_01_F7_res <- topTable(vobjDream_ebayes_R1, coef = "L_base_01_F7", n = nrow(count_table_R1), adjust.method = NULL)
+L_base_01_F7_res$contrast <- "L_base_01_F7"
+L_base_01_F7_res <- L_base_01_F7_res %>% rownames_to_column(var = "gene_id")  
+#
+L_base_01_F31_res <- topTable(vobjDream_ebayes_R1, coef = "L_base_01_F31", n = nrow(count_table_R1), adjust.method = NULL)
+L_base_01_F31_res$contrast <- "L_base_01_F31"
+L_base_01_F31_res <- L_base_01_F31_res %>% rownames_to_column(var = "gene_id")  
+#
+L_base_01_F7_F31_res <- topTable(vobjDream_ebayes_R1, coef = "L_base_01_F7_F31", n = nrow(count_table_R1), adjust.method = NULL)
+L_base_01_F7_F31_res$contrast <- "L_base_01_F7_F31"
+L_base_01_F7_F31_res <- L_base_01_F7_F31_res %>% rownames_to_column(var = "gene_id")  
+# Merge the data-sets:
+all_DE_results_R1 <- rbind(L_base_01_F7_res,
+                        L_base_01_F31_res,
+                        L_base_01_F7_F31_res)
+
 ###
 L_base_02_F7_res <- topTable(vobjDream_ebayes_R2, coef = "L_base_02_F7", n = nrow(count_table_R2), adjust.method = NULL)
 L_base_02_F7_res$contrast <- "L_base_02_F7"
@@ -787,7 +924,9 @@ all_DE_results_R6 <- rbind(L_base_06_F7_res,
 
 
 ## Create DE_repwise_results data-set:
-DE_repbyrep_3_contrasts_results <- rbind(all_DE_results_R1, all_DE_results_R2, all_DE_results_R3, all_DE_results_R4, all_DE_results_R5, all_DE_results_R6)
+DE_repbyrep_3_contrasts_results <- rbind(all_DE_results_R1, all_DE_results_R2,
+                                         all_DE_results_R3, all_DE_results_R4,
+                                         all_DE_results_R5, all_DE_results_R6)
 # Remove per group adjusted val:
 DE_repbyrep_3_contrasts_results <- DE_repbyrep_3_contrasts_results %>% dplyr::select("gene_id","logFC","AveExpr","t","P.Value","B","contrast")
 # Adjust p-values across all contrasts:
@@ -805,8 +944,8 @@ DE_repbyrep_3_contrasts_results <- DE_repbyrep_3_contrasts_results %>%
 # Export DE results:
 ```{r}
 export_df <- DE_repbyrep_3_contrasts_results
-write_csv(export_df,"input_files/DE_repwise_results.csv")
-write_csv(export_df, "output_files/DE_repwise_results.csv")
+#write_csv(export_df,"input_files/DE_repwise_results_test.csv")
+#write_csv(export_df, "output_files/DE_repwise_results.csv")
   
 ```
 ## Summary plots repwise DEGS:
@@ -848,6 +987,8 @@ display_venn <- function(x, ...){
   grid.draw(venn_object)
   }
 
+## Prepare data-sets:
+
 # overall model:
 F7 <- DE_overall_results %>%
   dplyr::filter(padj_fdr < 0.05 & generation == "gen07")
@@ -862,12 +1003,14 @@ F7_rs <- DE_repbyrep_3_contrasts_results %>%
 F31_rs <- DE_repbyrep_3_contrasts_results %>%
   dplyr::filter(padj_fdr < 0.05 & generation == "gen31")
 
+
 ## Venn Diagram F7:
 
 x <- list(F7$gene_id, F7_rs$gene_id)
 
 display_venn(x,
-  category.names = c("Overall-model" , "Replicate-wise models"),
+  category.names = c("Overall-model",
+                     "Replicate-wise models"),
   fill = c("#edf8b1","#2c7fb8"), 
   cat.cex = 0.8,
   cat.fontface = "bold",
@@ -878,7 +1021,8 @@ display_venn(x,
 x <- list(F31$gene_id, F31_rs$gene_id)
 
 display_venn(x,
-  category.names = c("Overall-model" , "Replicate-wise models"),
+  category.names = c("Overall-model",
+                     "Replicate-wise models"),
   fill = c("#edf8b1","#2c7fb8"), 
   cat.cex = 0.8,
   cat.fontface = "bold",
