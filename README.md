@@ -149,11 +149,11 @@ Input 1: classify_trajectories_df.csv\
 Input 2: DE_overall_results.csv\
 Input 3: FlyAtlas2_gene_data_2023.csv\
 Input 4: DE_repwise_results.csv\
-Input 5: shared_upset_data.csv\
+Input 5: shared_upset_data.csv
  
 Output 1: GO_enrichment_results_BP.xlsx\
 Output 2: tissue_enrichment_results.xlsx\
-Output 3: KEGG_enrichment_results.xlsx\
+Output 3: KEGG_enrichment_results.xlsx
 
 ## 15_Darwin_numerator_HighOrder_pheno.Rmd
 
@@ -168,10 +168,10 @@ Input 5: Barghi_LNS_HotI_fecundity.csv\
 Input 6: Barghi_LNS_HotI_HotbodyFatContent.csv\
 Input 7: Barghi_LNSI_metabolism.csv\
 Input 8: Mallard_LNS_HotII_Cold_fecundity.csv\
-Input 9: Mallard_LNS_HotII_Cold_fecundity_counts.csv\
+Input 9: Mallard_LNS_HotII_Cold_fecundity_counts.csv
 
 Output 1: Darwin_numerators_all_studies_HighOrder_pheno.csv contains the Darwin
-numerators as well as Haldanes and Darwins for all traits.\ 
+numerators as well as Haldanes and Darwins for all traits. 
 
 ## 16_Darwin_numerator_gene_expression.Rmd
 
@@ -184,7 +184,7 @@ Input 2: classify_trajectories_df.csv (our study)\
 Input 3: DE_overall_results.csv (our study)\
 Input 4: Souto_Maior_Artificial_Selection_GSE202600_Normalized_read_counts.csv\
 Input 5: Hsu_LNS_HotI_RNASeq_CGE1_count_table_transcriptome.csv\
-Input 6: Mallard_LNS_HotII_Cold_Final_counts_Dryad_transcriptome.csv\
+Input 6: Mallard_LNS_HotII_Cold_Final_counts_Dryad_transcriptome.csv
 
 ## 17_Transcriptomic_trajectories_after_filter_by_log2FC.Rmd
 
@@ -205,10 +205,18 @@ the equilibrium or stasis phase.
 Here we use the transcriptomic data published by
 C. Souto-Maior et al., PLOS Comput. Biol (2023)
 
-Input 1: Souto_Maior_Artificial_Selection_GSE202600_Normalized_read_counts.csv\
+Input 1: Souto_Maior_Artificial_Selection_GSE202600_Normalized_read_counts.csv
 
 
 ## 19_Diet_composition.Rmd
 Code to plot the composition of Standard and High Protein diets in Fig. S3.
+
+## 20_Djackknife_test_parallelism.Rmd
+This R notebook contains the code to perfom D-Jackknife on replicate specific 
+DE data to quantify a null distribution of Jaccard Index (parallelism).
+
+Input 1: DE_repwise_results.csv
+Input 2: count_table.csv\
+
 
 --- END ---
