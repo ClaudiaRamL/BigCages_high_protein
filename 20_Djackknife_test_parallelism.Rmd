@@ -1,0 +1,652 @@
+---
+title: "High-Protein BigCages - Permutation test for Jaccard Index and Pearson´s correlation"
+Author: "Claudia Ramirez-lanzas"
+Date: "13/03/2025"
+---
+
+# Load libraries:
+```{r}
+# Data handling:
+library("writexl") 
+library("tidyverse") 
+
+# Plotting:
+library("ggplot2") 
+library("svglite") 
+library("UpSetR") # UpSets plots
+library("patchwork") 
+library("khroma") # plotting colour blind safe
+library("ggpubr") 
+library("rstatix")
+library("ggsignif")
+
+# Needed libraries to implement dream:
+library("variancePartition")
+library("BiocParallel")
+library("edgeR")
+library("lme4")
+
+
+```
+
+# Import files:
+```{r}
+
+DE_rep_specific_results <- read_csv("input_files/DE_repwise_results.csv", show_col_types = FALSE)
+DE_rep_specific_results <- DE_rep_specific_results %>% dplyr::filter(generation != "transitory_F7_F31") 
+
+count_table <- read.delim("input_files/count_table.csv",  sep = ";")
+# Transform gene_id into rownames:
+count_table <- column_to_rownames(count_table, var = "gene_id")
+
+```
+
+*DE_rep_specific_results: contains the results of replicate wise DE analysis:
+6 independent models, one for each replicate and base population. 
+P-values are corrected across all contrasts and replicates. 
+
+*count_table: .csv file  containing the RNA count table (the output of featureCounts function from subRead).
+Each column is a sample and each row a gene.It contains 5 samples from Base (F0),
+18 samples from Big populations at F7 and 18 samples at F31.
+The samples are labeled with biological names.
+
+# Function 1: Compute Jaccard Index per group
+This function uses replicate wise DE results to compute Jaccard Index in >= 1 groups.
+Arguments:
+
+* df: a data-set containing at least 3 columns:
+1) the gene_id of the DEGs (only include DEGs, non-significant genes should be
+excluded here), 2)
+the replicate id, 3)
+the group id (e.g., the transcriptomic group, the generation etc)
+
+* group: the column name for the grouping variable. 
+```{r}
+compute_jaccard_index_per_group <- function(df, group ) {
+  # Summarize gene IDs per contrast
+  gene_ids_per_contrast <- df %>%
+    group_by(group, contrast) %>%
+    summarise(gene_ids = list(gene_id), .groups = 'drop')
+  
+  # Create an empty data-frame to store the results:
+  results <- data.frame(
+    group = integer(),
+    contrast1 = character(),
+    contrast2 = character(),
+    Jaccard_Index = numeric(),
+    stringsAsFactors = FALSE)
+  
+  # Generate pairwise comparisons:
+  unique_contrasts <- unique(gene_ids_per_contrast$contrast)
+  pairwise_comparisons <- combn(unique_contrasts, 2, simplify = FALSE)
+  
+  # Create a data frame to store these comparisons:
+  comparison_list <- data.frame(
+    contrast1 = character(),
+    contrast2 = character(),
+    stringsAsFactors = FALSE)
+  
+  # Introduce pair wise comparisons:
+  for (pair in pairwise_comparisons) {
+    comparison_list <- rbind(comparison_list, data.frame(
+      contrast1 = pair[1],
+      contrast2 = pair[2],
+      stringsAsFactors = FALSE
+    ))
+  }
+  
+  # Perform comparisons based on the comparison list:
+  for (grp in unique(gene_ids_per_contrast$group)) {
+    # Subset data for the current group:
+    subset_data <- gene_ids_per_contrast %>% filter(group == grp)
+    
+    for (i in 1:nrow(comparison_list)) {
+      contrast1 <- comparison_list$contrast1[i]
+      contrast2 <- comparison_list$contrast2[i]
+      
+      # Get gene IDs for each contrast:
+      gene_ids1 <- subset_data %>% filter(contrast == contrast1) %>% pull(gene_ids) %>% unlist()
+      gene_ids2 <- subset_data %>% filter(contrast == contrast2) %>% pull(gene_ids) %>% unlist()
+      
+      # Calculate Jaccard index:
+      jaccard_index <- length(intersect(gene_ids1, gene_ids2)) / length(union(gene_ids1, gene_ids2))
+      
+      # Store the result:
+      results <- rbind(results, data.frame(
+        group = grp,
+        contrast1 = contrast1,
+        contrast2 = contrast2,
+        Jaccard_Index = jaccard_index,
+        stringsAsFactors = FALSE
+      ))
+    }
+  }
+  
+  return(results)
+}
+
+```
+
+# Function 2: Compute pairwise Pearson´s correlation:
+This function uses replicate wise DE results to compute Pearson correlation on
+the whole transcriptome log2FC responses. 
+
+*data: the replicate wise DE results containing the log2FC of all replicates. 
+*generation: generation that we want to use 
+*logFC_generation: column name containing generation specific log2FC
+```{r}
+compute_correlations <- function(data, generation, logFC_generation) {
+  
+  data <- filtered_df %>%  dplyr::filter(generation == !!generation) %>% select(gene_id, !!logFC_generation, replicate) 
+  # Pivot data so that replicates are columns and logFC values are rows
+  wide_data <- tidyr::pivot_wider(data, names_from = replicate, values_from = logFC_generation)
+  
+  # Remove the generation column for correlation computation
+  wide_data <- wide_data %>% dplyr::select(gene_id, R1, R2, R3, R4, R5, R6)
+  
+  # Compute Pearson correlation for pairwise replicates
+  cor_matrix <- stats::cor(wide_data[, c("R1", "R2", "R3", "R4", "R5", "R6")])
+  
+  # Create a data_frame:
+  cor_df <- as.data.frame(as.table(cor_matrix))
+  cor_df$contrast <- paste(cor_df$Var1, cor_df$Var2, sep = "_")
+  cor_df$generation <- generation
+  cor_df$analysis <- "Pearson´s correlation on log2FC"
+  cor_df <- cor_df %>% dplyr::select(generation, analysis, contrast, Freq)
+  colnames(cor_df) <- c("generation", "analysis", "contrast", "pearson_corr")
+  
+  # Round pearson correlation coefficient up to 3 decimals:
+  cor_df$pearson_corr <- round(cor_df$pearson_corr, 3)
+  
+  return(cor_df)
+}
+
+
+```
+# Permute labels of evolved repliates in count-table:
+Here we recompute replicate wise Differential Expression analysis and Jaccard
+Index after reshuffling the labels of the evolved replicates in each iteration
+using a for loop.
+```{r}
+# Create an empty list to store results
+Iter_Jaccard_Index_results <- list()
+
+set.seed(1)
+
+for (i in 1:500) {
+  
+  ##### Reshuffle randomly the sample names between evolved replicates:
+  
+  # Exclude Base population from label permutation:
+  base_count_table <- count_table[,1:5]
+  evol_count_table_F7 <- count_table[,6:23]
+  evol_count_table_F31 <- count_table[,24:41]
+  # Store sample labels in a vector:
+  original_base_labels <- colnames(base_count_table) # 5 samples
+  original_evol_labels_F7 <- colnames(evol_count_table_F7) # 18 samples
+  original_evol_labels_F31 <- colnames(evol_count_table_F31) # 18 samples
+  # Reshuffle randomly the original_evol_labels:
+  reshuff_original_evol_labels_F7 <- original_evol_labels_F7[base::sample(c(1:18), replace = FALSE)]
+  reshuff_original_evol_labels_F31 <- original_evol_labels_F31[base::sample(c(1:18), replace = FALSE)]
+  # Create reshuffled sample names vector with base (non-reshuffled) and evolved (reshuffled):
+  reshuff_labels <- c(original_base_labels, reshuff_original_evol_labels_F7, reshuff_original_evol_labels_F31)
+  # Rename count_table with reshuffled labels:
+  reshuff_count_table <- count_table
+  colnames(reshuff_count_table) <- reshuff_labels
+  # Print progress
+  cat("Iteration:", i, "\n")
+
+
+##### Filter low expression:
+ #Set CPM threshold:
+  CPM_threshold <- 1 
+
+ ## R1:
+  reshuff_count_table_R1 <- dplyr::select(reshuff_count_table, matches("rep_B|rep_31_"))
+# Create filtered count table:
+  reshuff_count_table_R1 <- reshuff_count_table_R1[apply(cpm(reshuff_count_table_R1), 1,
+                                                         function(x){!(sum(x < CPM_threshold) >= 1)}),] # If there is one sample or more with CPM < threshold then the gene is filtered out. 
+## R2:
+  reshuff_count_table_R2 <- dplyr::select(reshuff_count_table, matches("rep_B|rep_32_"))
+# Create filtered count table:
+  reshuff_count_table_R2 <- reshuff_count_table_R2[apply(cpm(reshuff_count_table_R2), 1, function(x){!(sum(x < CPM_threshold) >= 1)}),] # If there is one sample or more with CPM < threshold then the gene is filtered out. 
+  ## R3:
+  reshuff_count_table_R3 <- dplyr::select(reshuff_count_table, matches("rep_B|rep_33_"))
+  # Create filtered count table:
+  reshuff_count_table_R3 <- reshuff_count_table_R3[apply(cpm(reshuff_count_table_R3), 1, function(x){!(sum(x < CPM_threshold) >= 1)}),] # If there is one sample or more with CPM < threshold then the gene is filtered out. 
+  ## R4:
+  reshuff_count_table_R4 <- dplyr::select(reshuff_count_table, matches("rep_B|rep_34_"))
+  # Create filtered count table:
+  reshuff_count_table_R4 <- reshuff_count_table_R4[apply(cpm(reshuff_count_table_R4), 1, function(x){!(sum(x < CPM_threshold) >= 1)}),] # If there is one sample or more with CPM < threshold then the gene is filtered out. 
+  ## R5:
+  reshuff_count_table_R5 <- dplyr::select(reshuff_count_table, matches("rep_B|rep_35_"))
+  # Create filtered count table:
+  reshuff_count_table_R5 <- reshuff_count_table_R5[apply(cpm(reshuff_count_table_R5), 1, function(x){!(sum(x < CPM_threshold) >= 1)}),] # If there is one sample or more with CPM <   threshold then the gene is filtered out. 
+  ## R6:
+  reshuff_count_table_R6 <- dplyr::select(reshuff_count_table, matches("rep_B|rep_36_"))
+  # Create filtered count table:
+  reshuff_count_table_R6 <- reshuff_count_table_R6[apply(cpm(reshuff_count_table_R6), 1, function(x){!(sum(x < CPM_threshold) >= 1)}),] # If there is one sample or more with CPM < threshold then the gene is filtered out
+  # Print progress
+  print("Count tables have been filtereb by low expression")
+  
+
+##### Create metadata:
+  # Create a data-set with group names:
+  group_names <- as_tibble(colnames(reshuff_count_table))
+
+  # Add generation information:
+  group_names <- group_names %>% 
+     dplyr::mutate(generation = case_when(
+       grepl("CGE1", value)  ~"gen0",
+       grepl("CGE2_1", value) ~"gen7",
+       grepl("CGE3_1", value) ~"gen31"))
+
+  # Rename value as unique_id:
+  group_names <- group_names %>% dplyr::rename(unique_id = value)
+  group_names$generation <- factor(group_names$generation, levels = c("gen0", "gen7", "gen31"))
+
+  # Add replicate information:
+  group_names <- group_names %>% 
+     dplyr::mutate(rep = case_when(
+       grepl("rep_B", unique_id) ~"base",
+       grepl("rep_31", unique_id)  ~"01",
+       grepl("rep_32", unique_id)  ~"02",
+       grepl("rep_33", unique_id)  ~"03",
+       grepl("rep_34", unique_id)  ~"04",
+       grepl("rep_35", unique_id)  ~"05",
+       grepl("rep_36", unique_id)  ~"06"))
+
+ # Add Replicate_generation information:
+  group_names <- group_names %>% 
+     dplyr::mutate(gen_rep = case_when(
+       grepl("rep_B", unique_id) ~"CGE1_base",
+       grepl("rep_31", unique_id) & grepl("CGE2_1", unique_id) ~"gen07_01",
+       grepl("rep_32", unique_id) & grepl("CGE2_1", unique_id) ~"gen07_02",
+       grepl("rep_33", unique_id) & grepl("CGE2_1", unique_id) ~"gen07_03",
+       grepl("rep_34", unique_id) & grepl("CGE2_1", unique_id) ~"gen07_04",
+       grepl("rep_35", unique_id) & grepl("CGE2_1", unique_id) ~"gen07_05",
+       grepl("rep_36", unique_id) & grepl("CGE2_1", unique_id) ~"gen07_06",
+       grepl("rep_31", unique_id) & grepl("CGE3_1", unique_id) ~"gen31_01",
+       grepl("rep_32", unique_id) & grepl("CGE3_1", unique_id) ~"gen31_02",
+       grepl("rep_33", unique_id) & grepl("CGE3_1", unique_id) ~"gen31_03",
+       grepl("rep_34", unique_id) & grepl("CGE3_1", unique_id) ~"gen31_04",
+       grepl("rep_35", unique_id) & grepl("CGE3_1", unique_id) ~"gen31_05",
+       grepl("rep_36", unique_id) & grepl("CGE3_1", unique_id) ~"gen31_06"))
+
+  group_names$gen_rep <- as.factor(group_names$gen_rep)
+
+
+  # Check if sample names are correct in the count table and in the group 
+  colnames(reshuff_count_table) == group_names$unique_id
+  # Store final data-set as metadata_TB:
+  metadata <- group_names
+  # metadata as a dataframe:
+  metadata <- as.data.frame(metadata)
+  # gene_id as rownames: need to be in a column and also as rownames
+  rownames(metadata) <- metadata$unique_id
+
+  # Filter only Base and one replicate at a time:
+  metadata_R1 <- metadata %>% dplyr::filter(rep %in% c("base", "01")) %>% droplevels()
+  metadata_R2 <- metadata %>% dplyr::filter(rep %in% c("base", "02")) %>% droplevels()
+  metadata_R3 <- metadata %>% dplyr::filter(rep %in% c("base", "03")) %>% droplevels()
+  metadata_R4 <- metadata %>% dplyr::filter(rep %in% c("base", "04")) %>% droplevels()
+  metadata_R5 <- metadata %>% dplyr::filter(rep %in% c("base", "05")) %>% droplevels()
+  metadata_R6 <- metadata %>% dplyr::filter(rep %in% c("base", "06")) %>% droplevels()
+
+  print("Metadata tables have been created for each replicate")
+
+  #### Create EList objects:
+
+  dge_R1 <- new("EList", list(E = reshuff_count_table_R1,
+                            genes = rownames(reshuff_count_table_R1),
+                            samples = colnames(reshuff_count_table_R1),
+                            metadata = metadata_R1))
+
+  dge_R2 <- new("EList", list(E = reshuff_count_table_R2,
+                            genes = rownames(reshuff_count_table_R2),
+                            samples = colnames(reshuff_count_table_R2),
+                            metadata = metadata_R2))
+
+  dge_R3 <- new("EList", list(E = reshuff_count_table_R3,
+                            genes = rownames(reshuff_count_table_R3),
+                            samples = colnames(reshuff_count_table_R3),
+                            metadata = metadata_R3))
+
+  dge_R4 <- new("EList", list(E = reshuff_count_table_R4,
+                            genes = rownames(reshuff_count_table_R4),
+                            samples = colnames(reshuff_count_table_R4),
+                            metadata = metadata_R4))
+
+  dge_R5 <- new("EList", list(E = reshuff_count_table_R5,
+                            genes = rownames(reshuff_count_table_R5),
+                            samples = colnames(reshuff_count_table_R5),
+                            metadata = metadata_R5))
+
+  dge_R6 <- new("EList", list(E = reshuff_count_table_R6,
+                            genes = rownames(reshuff_count_table_R6),
+                            samples = colnames(reshuff_count_table_R6),
+                            metadata = metadata_R6))
+
+  print("EList objects have been created")
+
+
+##### Specify the contrasts:
+  # Model formula:
+  form_dream <- ~ 0 + gen_rep 
+
+  L_base_01_F7  <- getContrast(dge_R1$E, form_dream, dge_R1$metadata, c("gen_repgen07_01","gen_repCGE1_base"))  
+  L_base_01_F31  <- getContrast(dge_R1$E, form_dream, dge_R1$metadata, c("gen_repgen31_01","gen_repCGE1_base"))   
+  L_base_01_F7_F31  <- getContrast(dge_R1$E, form_dream, dge_R1$metadata, c("gen_repgen31_01","gen_repgen07_01"))   
+  # Create contrast matrix
+  L_1 <- cbind(L_base_01_F7, L_base_01_F31, L_base_01_F7_F31)
+
+  L_base_02_F7  <- getContrast(dge_R2$E, form_dream, dge_R2$metadata, c("gen_repgen07_02","gen_repCGE1_base"))  
+  L_base_02_F31  <- getContrast(dge_R2$E, form_dream, dge_R2$metadata, c("gen_repgen31_02","gen_repCGE1_base"))   
+  L_base_02_F7_F31  <- getContrast(dge_R2$E, form_dream, dge_R2$metadata, c("gen_repgen31_02","gen_repgen07_02"))   
+  # Create contrast matrix
+  L_2 <- cbind(L_base_02_F7, L_base_02_F31, L_base_02_F7_F31)
+
+  L_base_03_F7  <- getContrast(dge_R3$E, form_dream, dge_R3$metadata, c("gen_repgen07_03","gen_repCGE1_base"))  
+  L_base_03_F31  <- getContrast(dge_R3$E, form_dream, dge_R3$metadata, c("gen_repgen31_03","gen_repCGE1_base"))   
+  L_base_03_F7_F31  <- getContrast(dge_R3$E, form_dream, dge_R3$metadata, c("gen_repgen31_03","gen_repgen07_03"))   
+  # Create contrast matrix
+  L_3 <- cbind(L_base_03_F7, L_base_03_F31, L_base_03_F7_F31)
+
+  L_base_04_F7  <- getContrast(dge_R4$E, form_dream, dge_R4$metadata, c("gen_repgen07_04","gen_repCGE1_base"))  
+  L_base_04_F31  <- getContrast(dge_R4$E, form_dream, dge_R4$metadata, c("gen_repgen31_04","gen_repCGE1_base"))   
+  L_base_04_F7_F31  <- getContrast(dge_R4$E, form_dream, dge_R4$metadata, c("gen_repgen31_04","gen_repgen07_04"))   
+  # Create contrast matrix
+  L_4 <- cbind(L_base_04_F7, L_base_04_F31, L_base_04_F7_F31)
+
+  L_base_05_F7  <- getContrast(dge_R5$E, form_dream, dge_R5$metadata, c("gen_repgen07_05","gen_repCGE1_base"))  
+  L_base_05_F31  <- getContrast(dge_R5$E, form_dream, dge_R5$metadata, c("gen_repgen31_05","gen_repCGE1_base"))   
+  L_base_05_F7_F31  <- getContrast(dge_R5$E, form_dream, dge_R5$metadata, c("gen_repgen31_05","gen_repgen07_05"))   
+  # Create contrast matrix
+  L_5 <- cbind(L_base_05_F7, L_base_05_F31, L_base_05_F7_F31)
+
+  L_base_06_F7  <- getContrast(dge_R6$E, form_dream, dge_R6$metadata, c("gen_repgen07_06","gen_repCGE1_base"))  
+  L_base_06_F31  <- getContrast(dge_R6$E, form_dream, dge_R6$metadata, c("gen_repgen31_06","gen_repCGE1_base"))   
+  L_base_06_F7_F31  <- getContrast(dge_R6$E, form_dream, dge_R6$metadata, c("gen_repgen31_06","gen_repgen07_06"))   
+  # Create contrast matrix
+  L_6 <- cbind(L_base_06_F7, L_base_06_F31, L_base_06_F7_F31)
+  
+  print("Contrasts have been set: F0 vs F7, F0 vs F31 and F7 vs F31")
+  
+
+###### Fit the models:
+
+  # The variable to be tested must be a fixed effect:
+  form_dream <- ~  0 + gen_rep 
+
+  # Estimate weights using linear mixed model of dream:
+  vobjDream_R1 <- voomWithDreamWeights(dge_R1$E, form_dream, dge_R1$metadata)
+  # Fit the mixed model on each gene:
+  vobjDream_R1 <- dream(exprObj = vobjDream_R1,
+                   formula = form_dream,
+                                       data = dge_R1$metadata,
+                                       useWeights = T,
+                                       L = L_1,
+                                       computeResiduals = TRUE,
+                                       quiet = F,
+                                       REML = F)
+
+  # Estimate weights using linear mixed model of dream:
+  vobjDream_R2 <- voomWithDreamWeights(dge_R2$E, form_dream, dge_R2$metadata)
+  # Fit the mixed model on each gene:
+  vobjDream_R2 <- dream(exprObj = vobjDream_R2,
+                   formula = form_dream,
+                                       data = dge_R2$metadata,
+                                       useWeights = T,
+                                       L = L_2,
+                                       computeResiduals = TRUE,
+                                       quiet = F,
+                                       REML = F)
+
+  # Estimate weights using linear mixed model of dream:
+  vobjDream_R3 <- voomWithDreamWeights(dge_R3$E, form_dream, dge_R3$metadata)
+  # Fit the mixed model on each gene:
+  vobjDream_R3 <- dream(exprObj = vobjDream_R3,
+                   formula = form_dream,
+                                       data = dge_R3$metadata,
+                                       useWeights = T,
+                                       L = L_3,
+                                       computeResiduals = TRUE,
+                                       quiet = F,
+                                       REML = F)
+
+  # Estimate weights using linear mixed model of dream:
+  vobjDream_R4 <- voomWithDreamWeights(dge_R4$E, form_dream, dge_R4$metadata)
+  # Fit the mixed model on each gene:
+  vobjDream_R4 <- dream(exprObj = vobjDream_R4,
+                   formula = form_dream,
+                                       data = dge_R4$metadata,
+                                       useWeights = T,
+                                       L = L_4,
+                                       computeResiduals = TRUE,
+                                       quiet = F,
+                                       REML = F)
+
+  # Estimate weights using linear mixed model of dream:
+  vobjDream_R5 <- voomWithDreamWeights(dge_R5$E, form_dream, dge_R5$metadata)
+  # Fit the mixed model on each gene:
+  vobjDream_R5 <- dream(exprObj = vobjDream_R5,
+                   formula = form_dream,
+                                       data = dge_R5$metadata,
+                                       useWeights = T,
+                                       L = L_5,
+                                       computeResiduals = TRUE,
+                                       quiet = F,
+                                       REML = F)
+
+  # Estimate weights using linear mixed model of dream:
+  vobjDream_R6 <- voomWithDreamWeights(dge_R6$E, form_dream, dge_R6$metadata)
+  # Fit the mixed model on each gene:
+  vobjDream_R6 <- dream(exprObj = vobjDream_R6,
+                   formula = form_dream,
+                                       data = dge_R6$metadata,
+                                       useWeights = T,
+                                       L = L_6,
+                                       computeResiduals = TRUE,
+                                       quiet = F,
+                                       REML = F)
+
+  print("The linear model has been fitted")
+  
+###### eBayes:
+  vobjDream_ebayes_R1 <- variancePartition::eBayes(vobjDream_R1, robust=TRUE)
+  vobjDream_ebayes_R2 <- variancePartition::eBayes(vobjDream_R2, robust=TRUE)
+  vobjDream_ebayes_R3 <- variancePartition::eBayes(vobjDream_R3, robust=TRUE)
+  vobjDream_ebayes_R4 <- variancePartition::eBayes(vobjDream_R4, robust=TRUE)
+  vobjDream_ebayes_R5 <- variancePartition::eBayes(vobjDream_R5, robust=TRUE)
+  vobjDream_ebayes_R6 <- variancePartition::eBayes(vobjDream_R6, robust=TRUE)
+  
+  print("Empirical Bayes moderation applied in model outputs")
+  
+
+###### Adjust p-values:
+  #The p-values are corrected across all replicates, genes and the 3 different contrasts. We use fdr method.
+  ###
+  #
+  L_base_01_F7_res <- topTable(vobjDream_ebayes_R1, coef = "L_base_01_F7", n = nrow(reshuff_count_table_R1), adjust.method = NULL)
+  L_base_01_F7_res$contrast <- "L_base_01_F7"
+  L_base_01_F7_res <- L_base_01_F7_res %>% rownames_to_column(var = "gene_id")  
+  #
+  L_base_01_F31_res <- topTable(vobjDream_ebayes_R1, coef = "L_base_01_F31", n = nrow(reshuff_count_table_R1), adjust.method = NULL)
+  L_base_01_F31_res$contrast <- "L_base_01_F31"
+  L_base_01_F31_res <- L_base_01_F31_res %>% rownames_to_column(var = "gene_id")  
+  #
+  L_base_01_F7_F31_res <- topTable(vobjDream_ebayes_R1, coef = "L_base_01_F7_F31", n = nrow(reshuff_count_table_R1), adjust.method = NULL)
+  L_base_01_F7_F31_res$contrast <- "L_base_01_F7_F31"
+  L_base_01_F7_F31_res <- L_base_01_F7_F31_res %>% rownames_to_column(var = "gene_id")  
+  # Merge the data-sets:
+  all_DE_results_R1 <- rbind(L_base_01_F7_res,
+                        L_base_01_F31_res,
+                        L_base_01_F7_F31_res)
+  #
+  L_base_02_F7_res <- topTable(vobjDream_ebayes_R2, coef = "L_base_02_F7", n = nrow(reshuff_count_table_R2), adjust.method = NULL)
+  L_base_02_F7_res$contrast <- "L_base_02_F7"
+  L_base_02_F7_res <- L_base_02_F7_res %>% rownames_to_column(var = "gene_id")  
+  #
+  L_base_02_F31_res <- topTable(vobjDream_ebayes_R2, coef = "L_base_02_F31", n = nrow(reshuff_count_table_R2), adjust.method = NULL)
+  L_base_02_F31_res$contrast <- "L_base_02_F31"
+  L_base_02_F31_res <- L_base_02_F31_res %>% rownames_to_column(var = "gene_id")  
+  #
+  L_base_02_F7_F31_res <- topTable(vobjDream_ebayes_R2, coef = "L_base_02_F7_F31", n = nrow(reshuff_count_table_R2), adjust.method = NULL)
+  L_base_02_F7_F31_res$contrast <- "L_base_02_F7_F31"
+  L_base_02_F7_F31_res <- L_base_02_F7_F31_res %>% rownames_to_column(var = "gene_id")  
+  # Merge the data-sets:
+  all_DE_results_R2 <- rbind(L_base_02_F7_res,
+                        L_base_02_F31_res,
+                        L_base_02_F7_F31_res)
+  ###
+  L_base_03_F7_res <- topTable(vobjDream_ebayes_R3, coef = "L_base_03_F7", n = nrow(reshuff_count_table_R3), adjust.method = NULL)
+  L_base_03_F7_res$contrast <- "L_base_03_F7"
+  L_base_03_F7_res <- L_base_03_F7_res %>% rownames_to_column(var = "gene_id")  
+  #
+  L_base_03_F31_res <- topTable(vobjDream_ebayes_R3, coef = "L_base_03_F31", n = nrow(reshuff_count_table_R3), adjust.method = NULL)
+  L_base_03_F31_res$contrast <- "L_base_03_F31"
+  L_base_03_F31_res <- L_base_03_F31_res %>% rownames_to_column(var = "gene_id")  
+  #
+  L_base_03_F7_F31_res <- topTable(vobjDream_ebayes_R3, coef = "L_base_03_F7_F31", n = nrow(reshuff_count_table_R3), adjust.method = NULL)
+  L_base_03_F7_F31_res$contrast <- "L_base_03_F7_F31"
+  L_base_03_F7_F31_res <- L_base_03_F7_F31_res %>% rownames_to_column(var = "gene_id")  
+  # Merge the data-sets and perform p-value adjustment across all tests:
+  all_DE_results_R3 <- rbind(L_base_03_F7_res,
+                        L_base_03_F31_res,
+                        L_base_03_F7_F31_res)
+  ###
+  L_base_04_F7_res <- topTable(vobjDream_ebayes_R4, coef = "L_base_04_F7", n = nrow(reshuff_count_table_R4), adjust.method = NULL)
+  L_base_04_F7_res$contrast <- "L_base_04_F7"
+  L_base_04_F7_res <- L_base_04_F7_res %>% rownames_to_column(var = "gene_id")  
+  #
+  L_base_04_F31_res <- topTable(vobjDream_ebayes_R4, coef = "L_base_04_F31", n = nrow(reshuff_count_table_R4), adjust.method = NULL)
+  L_base_04_F31_res$contrast <- "L_base_04_F31"
+  L_base_04_F31_res <- L_base_04_F31_res %>% rownames_to_column(var = "gene_id")  
+  #
+  L_base_04_F7_F31_res <- topTable(vobjDream_ebayes_R4, coef = "L_base_04_F7_F31", n = nrow(reshuff_count_table_R4), adjust.method = NULL)
+  L_base_04_F7_F31_res$contrast <- "L_base_04_F7_F31"
+  L_base_04_F7_F31_res <- L_base_04_F7_F31_res %>% rownames_to_column(var = "gene_id")  
+  # Merge the data-sets and perform p-value adjustment across all tests:
+  all_DE_results_R4 <- rbind(L_base_04_F7_res,
+                        L_base_04_F31_res,
+                        L_base_04_F7_F31_res)
+  ###
+  L_base_05_F7_res <- topTable(vobjDream_ebayes_R5, coef = "L_base_05_F7", n = nrow(reshuff_count_table_R5), adjust.method = NULL)
+  L_base_05_F7_res$contrast <- "L_base_05_F7"
+  L_base_05_F7_res <- L_base_05_F7_res %>% rownames_to_column(var = "gene_id")  
+  #
+  L_base_05_F31_res <- topTable(vobjDream_ebayes_R5, coef = "L_base_05_F31", n = nrow(reshuff_count_table_R5), adjust.method = NULL)
+  L_base_05_F31_res$contrast <- "L_base_05_F31"
+  L_base_05_F31_res <- L_base_05_F31_res %>% rownames_to_column(var = "gene_id")  
+  #
+  L_base_05_F7_F31_res <- topTable(vobjDream_ebayes_R5, coef = "L_base_05_F7_F31", n = nrow(reshuff_count_table_R5), adjust.method = NULL)
+  L_base_05_F7_F31_res$contrast <- "L_base_05_F7_F31"
+  L_base_05_F7_F31_res <- L_base_05_F7_F31_res %>% rownames_to_column(var = "gene_id")  
+  # Merge the data-sets and perform p-value adjustment across all tests:
+  all_DE_results_R5 <- rbind(L_base_05_F7_res,
+                        L_base_05_F31_res,
+                        L_base_05_F7_F31_res)
+  ###
+  L_base_06_F7_res <- topTable(vobjDream_ebayes_R6, coef = "L_base_06_F7", n = nrow(reshuff_count_table_R6), adjust.method = NULL)
+  L_base_06_F7_res$contrast <- "L_base_06_F7"
+  L_base_06_F7_res <- L_base_06_F7_res %>% rownames_to_column(var = "gene_id")  
+  #
+  L_base_06_F31_res <- topTable(vobjDream_ebayes_R6, coef = "L_base_06_F31", n = nrow(reshuff_count_table_R6), adjust.method = NULL)
+  L_base_06_F31_res$contrast <- "L_base_06_F31"
+  L_base_06_F31_res <- L_base_06_F31_res %>% rownames_to_column(var = "gene_id")  
+  #
+  L_base_06_F7_F31_res <- topTable(vobjDream_ebayes_R6, coef = "L_base_06_F7_F31", n = nrow(reshuff_count_table_R6), adjust.method = NULL)
+  L_base_06_F7_F31_res$contrast <- "L_base_06_F7_F31"
+  L_base_06_F7_F31_res <- L_base_06_F7_F31_res %>% rownames_to_column(var = "gene_id")  
+  # Merge the data-sets and perform p-value adjustment across all tests:
+  all_DE_results_R6 <- rbind(L_base_06_F7_res,
+                        L_base_06_F31_res,
+                        L_base_06_F7_F31_res)
+
+  # Create DE_repwise_results data-set:
+  DE_repbyrep_3_contrasts_results <- rbind(all_DE_results_R1, all_DE_results_R2, 
+                                         all_DE_results_R3, all_DE_results_R4,
+                                         all_DE_results_R5, all_DE_results_R6)
+  # Remove per group adjusted val:
+  DE_repbyrep_3_contrasts_results <- DE_repbyrep_3_contrasts_results %>% dplyr::select("gene_id","logFC","AveExpr","t","P.Value","B","contrast")
+  # Adjust p-values across all contrasts:
+  DE_repbyrep_3_contrasts_results$padj_fdr <- p.adjust(DE_repbyrep_3_contrasts_results$P.Value, method = "fdr")
+
+  # Add generation:
+  DE_repbyrep_3_contrasts_results <- DE_repbyrep_3_contrasts_results %>% 
+     dplyr::mutate(generation = case_when(
+       grepl("F7_F31", contrast) ~ "transitory_F7_F31",
+       grepl("_F31", contrast) ~ "gen31",
+       grepl("_F7", contrast)  ~ "gen07"))
+  
+  print("p-value correction across all contrasts and replicates using FDR")
+
+  ###### Prepare data-set for Jaccard Index:
+
+  DE_rep_by_rep_classified_long <- DE_repbyrep_3_contrasts_results %>%
+  pivot_longer(
+    cols = starts_with("padj_"),
+    names_to = "gen",
+    values_to = "padj_fdr")
+  # Remove transitory:
+  DE_rep_by_rep_classified_long <- DE_rep_by_rep_classified_long %>% dplyr::filter(generation != "transitory_F7_F31")
+  # Remove non-significant genes from replicate-specific DE data-set:
+  DE_rep_by_rep_classified_filt <- DE_rep_by_rep_classified_long %>%
+  dplyr::filter(padj_fdr < 0.05) %>% dplyr::select(gene_id, contrast, generation, padj_fdr)
+
+  # Convert generation into the group variable:
+  DE_wise_6models_DEGs <- DE_rep_by_rep_classified_filt %>% dplyr::rename(group = generation)
+  DE_wise_6models_DEGs <- DE_wise_6models_DEGs %>% dplyr::select(gene_id, group, contrast)
+  DE_wise_6models_DEGs$group <- factor(DE_wise_6models_DEGs$group, levels = c("gen07", "gen31"))
+  # Compute pair-wise Jaccard Index within generation:
+  F7 <- DE_wise_6models_DEGs %>% dplyr::filter(group == "gen07")
+  F31 <- DE_wise_6models_DEGs %>% dplyr::filter(group == "gen31")
+  
+  Jacccard_F7 <- compute_jaccard_index_per_group(F7) 
+  Jacccard_F31 <- compute_jaccard_index_per_group(F31)
+  Jacccard_F7_F31_results <- rbind(Jacccard_F7, Jacccard_F31)
+  # Remove non needed contrasts:
+  Jacccard_F7_F31_results <- na.omit(Jacccard_F7_F31_results)
+  Jacccard_F7_F31_results <- Jacccard_F7_F31_results %>% dplyr::rename(generation = group)
+  
+  
+  # Add iteration number as a new column
+  Jacccard_F7_F31_results$Iteration <- i
+
+  # Store in list
+  Iter_Jaccard_Index_results[[i]] <- Jacccard_F7_F31_results
+  
+}
+
+
+Iter_Jaccard_Index_results <- bind_rows(Iter_Jaccard_Index_results)
+  
+Iter_Jaccard_Index_results %>% ggplot(aes(x=Jaccard_Index)) +
+  geom_histogram(fill="lightgrey") +
+  facet_wrap(~ generation) +
+  theme_classic() + geom_vline(xintercept = 0.66, color= "blue") + 
+  theme( aspect.ratio = 1,
+    axis.title.x = element_text(size = 16),
+    axis.title.y = element_text(size = 16),
+    axis.text.x = element_text(size = 16, color = "black"),
+    axis.text.y = element_text(size = 16, color = "black"))
+
+```
+Compute a p-value
+```{r}
+average_JI <- Iter_Jaccard_Index_results %>% group_by(generation, Iteration) %>% summarize(meanJI = mean(Jaccard_Index))
+average_JI_F7 <- average_JI %>% dplyr::filter(generation == "gen07")
+average_JI_F31 <- average_JI %>% dplyr::filter(generation == "gen31")
+
+p_val_500_F7 <- sum(average_JI_F7$meanJI >= 0.66) / 500
+
+
+p_val_500_F31 <- sum(average_JI_F31$meanJI >= 0.66) / 500
+
+p_val_500_F7
+p_val_500_F31
+
+
+```
+
+--- END ---
