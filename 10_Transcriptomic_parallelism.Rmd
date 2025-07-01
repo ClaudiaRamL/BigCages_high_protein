@@ -69,6 +69,7 @@ Including 3 contrasts: Base vs F7, Base vs F31 and F7 vs F31. P-values corrected
 This function uses replicate wise DE results to compute Jaccard Index in >= 1 groups.
 Arguments:
 
+# Function 1: Compute Jaccard Index
 * df: a data-set containing at least 3 columns:
 1) the gene_id of the DEGs (only include DEGs, non-significant genes should be
 excluded here), 2)
